@@ -1,0 +1,80 @@
+name: Lancar Notas SGE
+
+on:
+  workflow_dispatch:
+    inputs:
+      escola:
+        description: Escola alvo
+        required: false
+        type: string
+      turno:
+        description: Turno alvo
+        required: false
+        type: string
+      turma:
+        description: Turma alvo
+        required: false
+        type: string
+      trimestre:
+        description: Trimestre alvo
+        required: false
+        type: string
+      notion_page_id:
+        description: Page ID da linha de solicitacao no Notion
+        required: false
+        type: string
+      dry_run:
+        description: Executa sem enviar ao SGE
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+jobs:
+  lancar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Playwright browser
+        run: playwright install chromium
+
+      - name: Run launcher
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          ROOT_PAGE_ID: ${{ secrets.ROOT_PAGE_ID }}
+          SGE_CPF: ${{ secrets.SGE_CPF }}
+          SGE_SENHA: ${{ secrets.SGE_SENHA }}
+          SGE_LOGIN_URL: ${{ secrets.SGE_LOGIN_URL }}
+          HEADLESS: "1"
+          INPUT_ESCOLA: ${{ github.event.inputs.escola || '' }}
+          INPUT_TURNO: ${{ github.event.inputs.turno || '' }}
+          INPUT_TURMA: ${{ github.event.inputs.turma || '' }}
+          INPUT_TRIMESTRE: ${{ github.event.inputs.trimestre || '' }}
+          INPUT_NOTION_PAGE_ID: ${{ github.event.inputs.notion_page_id || '' }}
+          INPUT_DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        run: |
+          ARGS=("lancar_notas_sge.py")
+
+          if [ -n "$INPUT_ESCOLA" ]; then ARGS+=("--escola" "$INPUT_ESCOLA"); fi
+          if [ -n "$INPUT_TURNO" ]; then ARGS+=("--turno" "$INPUT_TURNO"); fi
+          if [ -n "$INPUT_TURMA" ]; then ARGS+=("--turma" "$INPUT_TURMA"); fi
+          if [ -n "$INPUT_TRIMESTRE" ]; then ARGS+=("--trimestre" "$INPUT_TRIMESTRE"); fi
+          if [ -n "$INPUT_NOTION_PAGE_ID" ]; then ARGS+=("--notion-page-id" "$INPUT_NOTION_PAGE_ID"); fi
+          if [ "$INPUT_DRY_RUN" = "true" ]; then ARGS+=("--dry-run"); fi
+
+          echo "Executando python ${ARGS[*]}"
+          python "${ARGS[@]}"

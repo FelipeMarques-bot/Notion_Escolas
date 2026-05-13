@@ -1,0 +1,111 @@
+name: Solicitar Lancamento SGE (Issue)
+
+on:
+  issues:
+    types: [opened, reopened]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  processar_solicitacao:
+    if: contains(join(github.event.issue.labels.*.name, ','), 'solicitacao-sge')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Playwright browser
+        run: playwright install chromium
+
+      - name: Parse issue form
+        id: parse
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BODY_FILE="$RUNNER_TEMP/issue_body.md"
+          jq -r '.issue.body // ""' "$GITHUB_EVENT_PATH" | tr -d '\r' > "$BODY_FILE"
+
+          extract_field() {
+            local field="$1"
+            awk -v field="$field" '
+              $0 == "### " field {capture=1; next}
+              /^### / && capture {capture=0}
+              capture {print}
+            ' "$BODY_FILE" | sed '/^[[:space:]]*$/d' | head -n 1
+          }
+
+          escola="$(extract_field "Escola")"
+          turno="$(extract_field "Turno")"
+          turma="$(extract_field "Turma")"
+          trimestre="$(extract_field "Trimestre")"
+          notion_page_id="$(extract_field "Notion Page ID")"
+          dry_run="$(extract_field "Dry run")"
+
+          if [[ -z "$dry_run" ]]; then
+            dry_run="false"
+          fi
+
+          {
+            echo "escola=$escola"
+            echo "turno=$turno"
+            echo "turma=$turma"
+            echo "trimestre=$trimestre"
+            echo "notion_page_id=$notion_page_id"
+            echo "dry_run=$dry_run"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run launcher
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          ROOT_PAGE_ID: ${{ secrets.ROOT_PAGE_ID }}
+          SGE_CPF: ${{ secrets.SGE_CPF }}
+          SGE_SENHA: ${{ secrets.SGE_SENHA }}
+          SGE_LOGIN_URL: ${{ secrets.SGE_LOGIN_URL }}
+          HEADLESS: "1"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ARGS=("lancar_notas_sge.py")
+
+          if [[ -n "${{ steps.parse.outputs.escola }}" ]]; then ARGS+=("--escola" "${{ steps.parse.outputs.escola }}"); fi
+          if [[ -n "${{ steps.parse.outputs.turno }}" ]]; then ARGS+=("--turno" "${{ steps.parse.outputs.turno }}"); fi
+          if [[ -n "${{ steps.parse.outputs.turma }}" ]]; then ARGS+=("--turma" "${{ steps.parse.outputs.turma }}"); fi
+          if [[ -n "${{ steps.parse.outputs.trimestre }}" ]]; then ARGS+=("--trimestre" "${{ steps.parse.outputs.trimestre }}"); fi
+          if [[ -n "${{ steps.parse.outputs.notion_page_id }}" ]]; then ARGS+=("--notion-page-id" "${{ steps.parse.outputs.notion_page_id }}"); fi
+          if [[ "${{ steps.parse.outputs.dry_run }}" == "true" ]]; then ARGS+=("--dry-run"); fi
+
+          echo "Executando python ${ARGS[*]}"
+          python "${ARGS[@]}"
+
+      - name: Comentar resultado na issue
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const status = '${{ job.status }}' === 'success' ? 'Concluido com sucesso' : 'Falhou';
+            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = [
+              `Resultado da solicitacao: ${status}.`,
+              `Execucao: ${runUrl}`
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body
+            });

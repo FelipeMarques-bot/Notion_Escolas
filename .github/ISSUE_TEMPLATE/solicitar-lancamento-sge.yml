@@ -1,0 +1,68 @@
+name: Solicitar lancamento SGE
+description: Abre uma solicitacao para disparar o lancamento de notas no SGE.
+title: "Solicitar lancamento SGE"
+labels:
+  - solicitacao-sge
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Este formulario funciona como um botao de solicitacao.
+        Ao enviar, um workflow no GitHub Actions e disparado.
+
+  - type: input
+    id: escola
+    attributes:
+      label: Escola
+      description: Nome da escola (opcional)
+      placeholder: Ex. EEB Escola X
+    validations:
+      required: false
+
+  - type: input
+    id: turno
+    attributes:
+      label: Turno
+      description: Turno alvo (opcional)
+      placeholder: Ex. Matutino
+    validations:
+      required: false
+
+  - type: input
+    id: turma
+    attributes:
+      label: Turma
+      description: Turma alvo (opcional)
+      placeholder: Ex. 8A
+    validations:
+      required: false
+
+  - type: input
+    id: trimestre
+    attributes:
+      label: Trimestre
+      description: Trimestre alvo (opcional)
+      placeholder: Ex. 1
+    validations:
+      required: false
+
+  - type: input
+    id: notion_page_id
+    attributes:
+      label: Notion Page ID
+      description: Page ID para atualizar status no Notion (opcional)
+      placeholder: Ex. abc123...
+    validations:
+      required: false
+
+  - type: dropdown
+    id: dry_run
+    attributes:
+      label: Dry run
+      description: true = simula sem enviar no SGE
+      options:
+        - "false"
+        - "true"
+      default: 0
+    validations:
+      required: true
