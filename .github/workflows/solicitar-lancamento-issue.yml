@@ -26,6 +26,18 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Validate required secrets
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          ROOT_PAGE_ID: ${{ secrets.ROOT_PAGE_ID }}
+          SGE_CPF: ${{ secrets.SGE_CPF }}
+          SGE_SENHA: ${{ secrets.SGE_SENHA }}
+        run: |
+          if [ -z "$NOTION_TOKEN" ] || [ -z "$ROOT_PAGE_ID" ] || [ -z "$SGE_CPF" ] || [ -z "$SGE_SENHA" ]; then
+            echo "Error: missing one or more required secrets: NOTION_TOKEN, ROOT_PAGE_ID, SGE_CPF, SGE_SENHA"
+            exit 1
+          fi
+
       - name: Install Playwright browser
         run: python -m playwright install chromium
 

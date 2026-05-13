@@ -7,12 +7,23 @@ jobs:
   criar:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Instalar Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
+      - name: Validar secrets obrigatorios
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          ROOT_PAGE_ID: ${{ secrets.ROOT_PAGE_ID }}
+        run: |
+          if [ -z "$NOTION_TOKEN" ] || [ -z "$ROOT_PAGE_ID" ]; then
+            echo "Erro: secrets NOTION_TOKEN e/ou ROOT_PAGE_ID nao estao configurados no repositorio."
+            echo "Acesse Settings > Secrets and variables > Actions e confirme os nomes exatos."
+            exit 1
+          fi
 
       - name: Instalar dependências
         run: pip install -r requirements.txt
