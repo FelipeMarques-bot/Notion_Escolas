@@ -24,7 +24,6 @@ SGE_LOGIN_URL = os.environ.get("SGE_LOGIN_URL", "https://www.sge8147.com.br/")
 HEADLESS = os.environ.get("HEADLESS", "1") == "1"
 NAV_TIMEOUT_MS = int(os.environ.get("NAV_TIMEOUT_MS", "35000"))
 ACTION_TIMEOUT_MS = int(os.environ.get("ACTION_TIMEOUT_MS", "9000"))
-
 NOTION_STATUS_PROP = os.environ.get("NOTION_STATUS_PROP", "Status lancamento")
 NOTION_LAST_RUN_PROP = os.environ.get("NOTION_LAST_RUN_PROP", "Ultima execucao")
 NOTION_LOG_PROP = os.environ.get("NOTION_LOG_PROP", "Log execucao")
