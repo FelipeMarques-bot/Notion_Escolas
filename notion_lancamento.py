@@ -516,6 +516,18 @@ def encontrar_database_filho(parent_id, titulo, titulos_alternativos=None):
     return None
 
 
+def listar_databases_filhos(parent_id):
+    databases = []
+    for bloco in listar_blocos_filhos(parent_id):
+        if bloco.get("type") != "child_database" or bloco.get("archived", False):
+            continue
+        databases.append({
+            "id": bloco.get("id"),
+            "title": bloco.get("child_database", {}).get("title", ""),
+        })
+    return databases
+
+
 def encontrar_pagina_em_parents(parent_ids, titulo):
     for parent_id in parent_ids:
         page_id = encontrar_pagina_filha(parent_id, titulo)
@@ -933,6 +945,38 @@ def popular_alunos_no_database(database_id, alunos):
 
     return inseridos
 
+
+def reconciliar_alunos_databases_relacionados(parent_page_id, database_id_destino, titulo, titulos_alternativos=None):
+    titulos_alvo = {normalizar_titulo_notion(titulo)}
+    if titulos_alternativos:
+        for titulo_alt in titulos_alternativos:
+            titulos_alvo.add(normalizar_titulo_notion(titulo_alt))
+
+    relacionados = []
+    for db in listar_databases_filhos(parent_page_id):
+        db_id = db.get("id")
+        if not db_id or db_id == database_id_destino:
+            continue
+
+        titulo_db = normalizar_titulo_notion(db.get("title", ""))
+        if titulo_db in titulos_alvo:
+            relacionados.append(db_id)
+
+    if not relacionados:
+        return 0
+
+    alunos_para_recuperar = []
+    for db_id in relacionados:
+        nomes_db, _, _ = listar_nomes_alunos_no_database(db_id)
+        if nomes_db:
+            alunos_para_recuperar.extend(sorted(nomes_db))
+
+    if not alunos_para_recuperar:
+        return 0
+
+    # Insercao e deduplicacao ficam centralizadas nesta funcao.
+    return popular_alunos_no_database(database_id_destino, alunos_para_recuperar)
+
 def blocos_dashboard_raiz(estrutura_escolas=None):
     blocos = [
         bloco_espaco_para_capa(),
@@ -1229,13 +1273,26 @@ def criar_estrutura_completa():
                         cover_url=capa_nivel("trimestre"),
                         titulos_alternativos=[trimestre.replace("º", "°")],
                     )
+                    titulo_database = f"Notas Escolas - {trimestre} | {nome_escola} | {turno} | {turma}"
+                    titulos_alt_database = [
+                        f"Notas Escolas - {trimestre.replace('º', '°')} | {nome_escola} | {turno} | {turma}"
+                    ]
+
                     database_id, _ = criar_ou_atualizar_database_alunos(
                         trimestre_page_id,
-                        f"Notas Escolas - {trimestre} | {nome_escola} | {turno} | {turma}",
-                        titulos_alternativos=[
-                            f"Notas Escolas - {trimestre.replace('º', '°')} | {nome_escola} | {turno} | {turma}"
-                        ],
+                        titulo_database,
+                        titulos_alternativos=titulos_alt_database,
                     )
+
+                    qtd_recuperados_notion = reconciliar_alunos_databases_relacionados(
+                        trimestre_page_id,
+                        database_id,
+                        titulo_database,
+                        titulos_alternativos=titulos_alt_database,
+                    )
+                    if qtd_recuperados_notion:
+                        print(f"        ♻️ {qtd_recuperados_notion} alunos recuperados de databases anteriores")
+
                     if normalizar_rotulo_trimestre(trimestre) == normalizar_rotulo_trimestre(TRIMESTRE_IMPORTACAO_ALUNOS):
                         chave = (nome_escola, turno, turma)
                         qtd_inseridos = popular_alunos_no_database(
