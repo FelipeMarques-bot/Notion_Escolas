@@ -102,6 +102,25 @@ def _normalize(s: str) -> str:
     return re.sub(r"\s+", " ", s.strip().lower())
 
 
+def _normalize_notion_id(value: str) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+
+    # Aceita UUID com ou sem hifens, ou URL da pagina do Notion.
+    match = re.search(
+        r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{32})",
+        raw,
+    )
+    if not match:
+        return raw
+
+    token = match.group(1).replace("-", "").lower()
+    if len(token) != 32:
+        return raw
+    return f"{token[:8]}-{token[8:12]}-{token[12:16]}-{token[16:20]}-{token[20:32]}"
+
+
 def _to_float(value: object) -> Optional[float]:
     if value is None:
         return None
@@ -421,14 +440,16 @@ def _is_probably_grade_column(col_name: str) -> bool:
 
 
 def carregar_notas_notion(logger: Optional[LogFn] = None) -> List[RegistroNota]:
-    if not NOTION_TOKEN or not ROOT_PAGE_ID:
+    root_page_id = _normalize_notion_id(ROOT_PAGE_ID)
+
+    if not NOTION_TOKEN or not root_page_id:
         raise LancamentoError("Defina NOTION_TOKEN e ROOT_PAGE_ID nas variaveis de ambiente.")
     if _is_placeholder_env(NOTION_TOKEN) or _is_placeholder_env(ROOT_PAGE_ID):
         raise LancamentoError("NOTION_TOKEN/ROOT_PAGE_ID estao com placeholders. Atualize com valores reais.")
 
     notion = Client(auth=NOTION_TOKEN)
     _log(logger, "Conectando ao Notion e descobrindo databases...")
-    databases = _discover_databases(notion, ROOT_PAGE_ID)
+    databases = _discover_databases(notion, root_page_id)
 
     if not databases:
         raise LancamentoError("Nenhuma database foi encontrada a partir de ROOT_PAGE_ID.")
@@ -551,12 +572,14 @@ def listar_contextos_disponiveis(logger: Optional[LogFn] = None) -> List[Dict[st
         if "Nenhuma nota valida" not in str(exc):
             raise
 
-    if not NOTION_TOKEN or not ROOT_PAGE_ID:
+    root_page_id = _normalize_notion_id(ROOT_PAGE_ID)
+
+    if not NOTION_TOKEN or not root_page_id:
         raise LancamentoError("Defina NOTION_TOKEN e ROOT_PAGE_ID nas variaveis de ambiente.")
 
     notion = Client(auth=NOTION_TOKEN)
     _log(logger, "Nenhuma nota valida encontrada. Listando contextos pela estrutura das databases...")
-    databases = _discover_databases(notion, ROOT_PAGE_ID)
+    databases = _discover_databases(notion, root_page_id)
 
     contextos = set()
     for db_id, breadcrumb, db_title in databases:
@@ -842,6 +865,7 @@ def _build_filtro(args: argparse.Namespace) -> Dict[str, str]:
 
 def main() -> int:
     args = _parse_args()
+    args.notion_page_id = _normalize_notion_id(args.notion_page_id)
     logs_execucao: List[str] = []
 
     def logger(msg: str) -> None:
