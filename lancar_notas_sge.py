@@ -222,6 +222,85 @@ def atualizar_status_execucao_notion(
         _log(logger, f"Aviso: falha ao atualizar status no Notion: {exc}")
 
 
+def _find_pending_request_page_id(escola: str, logger: Optional[LogFn] = None) -> str:
+    escola = (escola or "").strip()
+    if not escola or not NOTION_TOKEN:
+        return ""
+
+    notion = Client(auth=NOTION_TOKEN)
+    target_title = f"Solicitacoes SGE - {escola}"
+
+    data_source_ids: List[str] = []
+    cursor = None
+    while True:
+        response = _safe_notion_call(
+            lambda: notion.search(
+                query=target_title,
+                filter={"property": "object", "value": "data_source"},
+                start_cursor=cursor,
+                page_size=100,
+            )
+        )
+
+        for ds in response.get("results", []):
+            title = "".join(x.get("plain_text", "") for x in ds.get("title", [])).strip()
+            if _normalize(title) != _normalize(target_title):
+                continue
+            ds_id = ds.get("id", "")
+            if ds_id:
+                data_source_ids.append(ds_id)
+
+        if not response.get("has_more"):
+            break
+        cursor = response.get("next_cursor")
+
+    if not data_source_ids:
+        _log(logger, f"Aviso: nenhuma data source de solicitacao encontrada para {escola}.")
+        return ""
+
+    for ds_id in data_source_ids:
+        cursor = None
+        while True:
+            query_resp = _safe_notion_call(
+                lambda: notion.data_sources.query(
+                    data_source_id=ds_id,
+                    start_cursor=cursor,
+                    page_size=100,
+                )
+            )
+
+            for page in query_resp.get("results", []):
+                props = page.get("properties", {})
+
+                req_prop = props.get(NOTION_REQUEST_PROP, {})
+                solicitar = req_prop.get("type") == "checkbox" and bool(req_prop.get("checkbox", False))
+
+                status_prop = props.get(NOTION_STATUS_PROP, {})
+                status_name = ""
+                if status_prop.get("type") == "select":
+                    status_name = ((status_prop.get("select") or {}).get("name") or "").strip()
+
+                escola_prop = _extract_plain_text(props.get("Escola", {})).strip()
+
+                if not solicitar:
+                    continue
+                if status_name not in {"", "Pendente"}:
+                    continue
+                if escola_prop and _normalize(escola_prop) != _normalize(escola):
+                    continue
+
+                page_id = page.get("id", "")
+                if page_id:
+                    return page_id
+
+            if not query_resp.get("has_more"):
+                break
+            cursor = query_resp.get("next_cursor")
+
+    _log(logger, f"Aviso: nenhuma solicitacao pendente encontrada para {escola}.")
+    return ""
+
+
 def _extract_plain_text(prop: Dict) -> str:
     ptype = prop.get("type")
     if ptype == "title":
@@ -871,6 +950,15 @@ def main() -> int:
     def logger(msg: str) -> None:
         print(msg)
         logs_execucao.append(msg)
+
+    if not args.notion_page_id and _is_non_empty(args.escola) and _normalize(args.escola) not in {"todas", "todos"}:
+        try:
+            auto_page_id = _find_pending_request_page_id(args.escola, logger=logger)
+            if auto_page_id:
+                args.notion_page_id = auto_page_id
+                logger("Page ID de solicitacao identificado automaticamente.")
+        except Exception as exc:  # noqa: BLE001
+            logger(f"Aviso: falha ao buscar Page ID automaticamente: {exc}")
 
     if args.listar_contextos:
         contextos = listar_contextos_disponiveis(logger=logger)

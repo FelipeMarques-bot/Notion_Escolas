@@ -47,7 +47,7 @@ on:
           - "2º Trimestre"
           - "3º Trimestre"
       notion_page_id:
-        description: Page ID da linha de solicitacao no Notion
+        description: Page ID da linha de solicitacao no Notion (opcional; vazio busca automaticamente pela escola)
         required: false
         type: string
       dry_run:
