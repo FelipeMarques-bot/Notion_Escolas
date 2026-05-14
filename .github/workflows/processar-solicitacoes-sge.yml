@@ -3,6 +3,11 @@ name: Processar Solicitacoes SGE
 "on":
   workflow_dispatch:
     inputs:
+      escola:
+        description: Escola para executar manualmente (opcional)
+        required: false
+        default: ""
+        type: string
       dry_run:
         description: Executa sem enviar ao SGE
         required: false
@@ -64,4 +69,5 @@ jobs:
           SGE_LOGIN_URL: ${{ secrets.SGE_LOGIN_URL }}
           HEADLESS: "1"
           DRY_RUN: ${{ github.event.inputs.dry_run || 'true' }}
+          MANUAL_ESCOLA: ${{ github.event.inputs.escola || '' }}
         run: python processar_solicitacoes_github.py

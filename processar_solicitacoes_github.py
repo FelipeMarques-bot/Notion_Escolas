@@ -11,6 +11,7 @@ from lancar_notas_sge import (
 
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "")
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
+MANUAL_ESCOLA = os.environ.get("MANUAL_ESCOLA", "").strip()
 
 DEFAULT_DATABASE_IDS = [
     "1bcc61e6-e3a8-493d-ad98-45ab49063103",  # Juvenal
@@ -97,17 +98,21 @@ def main() -> int:
         return 1
 
     notion = Client(auth=NOTION_TOKEN)
-    db_ids = _database_ids()
-
     all_requests: List[Dict[str, str]] = []
-    for db_id in db_ids:
-        try:
-            reqs = _pending_requests(notion, db_id)
-            all_requests.extend(reqs)
-            if reqs:
-                print(f"Database {db_id}: {len(reqs)} solicitacao(oes) pendente(s)")
-        except Exception as exc:  # noqa: BLE001
-            print(f"Aviso: falha ao consultar database {db_id}: {exc}")
+
+    if MANUAL_ESCOLA:
+        print(f"Modo manual: executando lancamento para escola '{MANUAL_ESCOLA}'.")
+        all_requests.append({"page_id": "", "escola": MANUAL_ESCOLA})
+    else:
+        db_ids = _database_ids()
+        for db_id in db_ids:
+            try:
+                reqs = _pending_requests(notion, db_id)
+                all_requests.extend(reqs)
+                if reqs:
+                    print(f"Database {db_id}: {len(reqs)} solicitacao(oes) pendente(s)")
+            except Exception as exc:  # noqa: BLE001
+                print(f"Aviso: falha ao consultar database {db_id}: {exc}")
 
     if not all_requests:
         print("Nenhuma solicitacao pendente encontrada.")
@@ -118,6 +123,9 @@ def main() -> int:
         escola = req["escola"]
 
         if not escola:
+            if not page_id:
+                print("Erro: MANUAL_ESCOLA vazio.")
+                continue
             atualizar_status_execucao_notion(
                 page_id=page_id,
                 status="Erro",
@@ -127,12 +135,13 @@ def main() -> int:
             print(f"Solicitacao {page_id}: erro por campo Escola vazio")
             continue
 
-        atualizar_status_execucao_notion(
-            page_id=page_id,
-            status="Em execucao",
-            log_text=f"Processando escola {escola}",
-            clear_request=False,
-        )
+        if page_id:
+            atualizar_status_execucao_notion(
+                page_id=page_id,
+                status="Em execucao",
+                log_text=f"Processando escola {escola}",
+                clear_request=False,
+            )
 
         try:
             result = executar_lancamento(filtro={"escola": escola}, logger=print, dry_run=DRY_RUN)
@@ -140,41 +149,45 @@ def main() -> int:
                 f"Concluido ({escola}). blocos={result['blocos']} notas={result['notas']} "
                 f"preenchidas={result['notas_preenchidas']} falhas={result['falhas']}"
             )
-            atualizar_status_execucao_notion(
-                page_id=page_id,
-                status="Concluido",
-                log_text=resumo,
-                clear_request=True,
-            )
+            if page_id:
+                atualizar_status_execucao_notion(
+                    page_id=page_id,
+                    status="Concluido",
+                    log_text=resumo,
+                    clear_request=True,
+                )
             print(resumo)
         except LancamentoError as exc:
             if (
                 "Nenhuma nota valida foi encontrada no Notion." in str(exc)
                 or "Nenhuma nota encontrada para o filtro selecionado." in str(exc)
             ):
-                atualizar_status_execucao_notion(
-                    page_id=page_id,
-                    status="Concluido",
-                    log_text=f"Sem notas para lancamento em {escola}.",
-                    clear_request=True,
-                )
+                if page_id:
+                    atualizar_status_execucao_notion(
+                        page_id=page_id,
+                        status="Concluido",
+                        log_text=f"Sem notas para lancamento em {escola}.",
+                        clear_request=True,
+                    )
                 print(f"Sem notas para {escola}.")
                 continue
 
-            atualizar_status_execucao_notion(
-                page_id=page_id,
-                status="Erro",
-                log_text=f"Erro: {exc}",
-                clear_request=True,
-            )
+            if page_id:
+                atualizar_status_execucao_notion(
+                    page_id=page_id,
+                    status="Erro",
+                    log_text=f"Erro: {exc}",
+                    clear_request=True,
+                )
             print(f"Erro em {escola}: {exc}")
         except Exception as exc:  # noqa: BLE001
-            atualizar_status_execucao_notion(
-                page_id=page_id,
-                status="Erro",
-                log_text=f"Erro inesperado: {exc}",
-                clear_request=True,
-            )
+            if page_id:
+                atualizar_status_execucao_notion(
+                    page_id=page_id,
+                    status="Erro",
+                    log_text=f"Erro inesperado: {exc}",
+                    clear_request=True,
+                )
             print(f"Erro inesperado em {escola}: {exc}")
 
     return 0

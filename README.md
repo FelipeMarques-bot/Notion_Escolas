@@ -74,6 +74,13 @@ Ha duas formas:
 3. Se houver item pendente, executa o lancamento e atualiza status/log na propria linha.
 4. Para teste, rode manualmente com `dry_run=true`.
 
+### Processamento manual por escola (sem checkbox)
+
+1. Acesse Actions > `Processar Solicitacoes SGE` > Run workflow.
+2. Preencha `escola` com o nome exato (ex.: `Juvenal`).
+3. Use `dry_run=true` para validar sem enviar ao SGE.
+4. Execute o workflow (neste modo, nao depende da tabela `Solicitacoes SGE`).
+
 ## Observacoes importantes
 
 - Os nomes das colunas de avaliacao no Notion devem bater com os nomes das avaliacoes no SGE.
