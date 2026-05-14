@@ -369,6 +369,9 @@ def propriedades_database_alunos(nome_coluna_titulo="Nome do Aluno"):
         ]}},
         "Grupo/Tema": {"rich_text": {}},
         "Atividade 1": {"rich_text": {}},
+        "Status lancamento 1": {"select": {"options": [
+            {"name": "Lancada", "color": "green"},
+        ]}},
         "Critérios nota 1": {"number": {"format": "number"}},
         "Status 1": {"select": {"options": [
             {"name": "Entregue",          "color": "green"},
@@ -376,12 +379,12 @@ def propriedades_database_alunos(nome_coluna_titulo="Nome do Aluno"):
             {"name": "Faltou",            "color": "orange"},
             {"name": "Falta Justificada", "color": "yellow"},
         ]}},
-        "Status lancamento 1": {"select": {"options": [
-            {"name": "Lancada", "color": "green"},
-        ]}},
         "Data realização 1": {"date": {}},
         "Observações 1": {"rich_text": {}},
         "Atividade 2": {"rich_text": {}},
+        "Status lancamento 2": {"select": {"options": [
+            {"name": "Lancada", "color": "green"},
+        ]}},
         "Critérios nota 2": {"number": {"format": "number"}},
         "Status 2": {"select": {"options": [
             {"name": "Entregue",          "color": "green"},
@@ -389,21 +392,18 @@ def propriedades_database_alunos(nome_coluna_titulo="Nome do Aluno"):
             {"name": "Faltou",            "color": "orange"},
             {"name": "Falta Justificada", "color": "yellow"},
         ]}},
-        "Status lancamento 2": {"select": {"options": [
-            {"name": "Lancada", "color": "green"},
-        ]}},
         "Data realização 2": {"date": {}},
         "Observações 2": {"rich_text": {}},
         "Atividade 3": {"rich_text": {}},
+        "Status lancamento 3": {"select": {"options": [
+            {"name": "Lancada", "color": "green"},
+        ]}},
         "Critérios nota 3": {"number": {"format": "number"}},
         "Status 3": {"select": {"options": [
             {"name": "Entregue",          "color": "green"},
             {"name": "Não Entregue",      "color": "red"},
             {"name": "Faltou",            "color": "orange"},
             {"name": "Falta Justificada", "color": "yellow"},
-        ]}},
-        "Status lancamento 3": {"select": {"options": [
-            {"name": "Lancada", "color": "green"},
         ]}},
         "Data realização 3": {"date": {}},
         "Observações 3": {"rich_text": {}},
