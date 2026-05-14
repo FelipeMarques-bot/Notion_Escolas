@@ -8,9 +8,14 @@ from datetime import datetime, timezone
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 from notion_client import Client
-from dotenv import load_dotenv
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
+
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover
+    def load_dotenv(*args, **kwargs):
+        return False
 
 LogFn = Callable[[str], None]
 
