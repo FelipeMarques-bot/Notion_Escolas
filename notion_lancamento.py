@@ -646,6 +646,9 @@ def propriedades_database_solicitacao_escola(titulo_prop="Name"):
         "Ultima execucao": {
             "date": {},
         },
+        "Data lancamento": {
+            "date": {},
+        },
         "Log execucao": {
             "rich_text": {},
         },

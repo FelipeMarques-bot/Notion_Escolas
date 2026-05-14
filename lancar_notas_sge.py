@@ -31,6 +31,7 @@ NAV_TIMEOUT_MS = int(os.environ.get("NAV_TIMEOUT_MS", "35000"))
 ACTION_TIMEOUT_MS = int(os.environ.get("ACTION_TIMEOUT_MS", "9000"))
 NOTION_STATUS_PROP = os.environ.get("NOTION_STATUS_PROP", "Status lancamento")
 NOTION_LAST_RUN_PROP = os.environ.get("NOTION_LAST_RUN_PROP", "Ultima execucao")
+NOTION_LAUNCH_DATE_PROP = os.environ.get("NOTION_LAUNCH_DATE_PROP", "Data lancamento")
 NOTION_LOG_PROP = os.environ.get("NOTION_LOG_PROP", "Log execucao")
 NOTION_REQUEST_PROP = os.environ.get("NOTION_REQUEST_PROP", "Solicitar lancamento")
 
@@ -212,6 +213,9 @@ def atualizar_status_execucao_notion(
         payload[NOTION_LAST_RUN_PROP] = {"date": {"start": _utc_now_iso()}}
     else:
         _log(logger, f"Aviso: propriedade de data nao encontrada/compativel: {NOTION_LAST_RUN_PROP}")
+
+    if NOTION_LAUNCH_DATE_PROP in props and props[NOTION_LAUNCH_DATE_PROP].get("type") == "date":
+        payload[NOTION_LAUNCH_DATE_PROP] = {"date": {"start": _utc_now_iso()}}
 
     if log_text and NOTION_LOG_PROP in props and props[NOTION_LOG_PROP].get("type") == "rich_text":
         payload[NOTION_LOG_PROP] = {"rich_text": _make_rich_text(log_text)}
