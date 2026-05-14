@@ -6,19 +6,46 @@ on:
       escola:
         description: Escola alvo
         required: false
-        type: string
+        default: "Todas"
+        type: choice
+        options:
+          - "Todas"
+          - "Juvenal"
+          - "Arapongas"
+          - "Mulde"
+          - "Anna Alves"
+          - "Tancredo"
+          - "Maria Helena"
       turno:
         description: Turno alvo
         required: false
-        type: string
+        default: "Todos"
+        type: choice
+        options:
+          - "Todos"
+          - "Matutino"
+          - "Vespertino"
       turma:
         description: Turma alvo
         required: false
-        type: string
+        default: "Todas"
+        type: choice
+        options:
+          - "Todas"
+          - "6º Ano"
+          - "7º Ano"
+          - "8º Ano"
+          - "9º Ano"
       trimestre:
         description: Trimestre alvo
         required: false
-        type: string
+        default: "Todos"
+        type: choice
+        options:
+          - "Todos"
+          - "1º Trimestre"
+          - "2º Trimestre"
+          - "3º Trimestre"
       notion_page_id:
         description: Page ID da linha de solicitacao no Notion
         required: false
@@ -90,10 +117,10 @@ jobs:
         run: |
           ARGS=("lancar_notas_sge.py")
 
-          if [ -n "$INPUT_ESCOLA" ]; then ARGS+=("--escola" "$INPUT_ESCOLA"); fi
-          if [ -n "$INPUT_TURNO" ]; then ARGS+=("--turno" "$INPUT_TURNO"); fi
-          if [ -n "$INPUT_TURMA" ]; then ARGS+=("--turma" "$INPUT_TURMA"); fi
-          if [ -n "$INPUT_TRIMESTRE" ]; then ARGS+=("--trimestre" "$INPUT_TRIMESTRE"); fi
+          if [[ -n "$INPUT_ESCOLA" && "$INPUT_ESCOLA" != "Todas" ]]; then ARGS+=("--escola" "$INPUT_ESCOLA"); fi
+          if [[ -n "$INPUT_TURNO" && "$INPUT_TURNO" != "Todos" ]]; then ARGS+=("--turno" "$INPUT_TURNO"); fi
+          if [[ -n "$INPUT_TURMA" && "$INPUT_TURMA" != "Todas" ]]; then ARGS+=("--turma" "$INPUT_TURMA"); fi
+          if [[ -n "$INPUT_TRIMESTRE" && "$INPUT_TRIMESTRE" != "Todos" ]]; then ARGS+=("--trimestre" "$INPUT_TRIMESTRE"); fi
           if [ -n "$INPUT_NOTION_PAGE_ID" ]; then ARGS+=("--notion-page-id" "$INPUT_NOTION_PAGE_ID"); fi
           if [ "$INPUT_DRY_RUN" = "true" ]; then ARGS+=("--dry-run"); fi
 
