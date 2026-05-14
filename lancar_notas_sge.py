@@ -434,6 +434,7 @@ def carregar_notas_notion(logger: Optional[LogFn] = None) -> List[RegistroNota]:
         raise LancamentoError("Nenhuma database foi encontrada a partir de ROOT_PAGE_ID.")
 
     registros: List[RegistroNota] = []
+    candidatos: List[Dict[str, Any]] = []
 
     for db_id, breadcrumb, db_title in databases:
         try:
@@ -445,7 +446,6 @@ def carregar_notas_notion(logger: Optional[LogFn] = None) -> List[RegistroNota]:
         title = _database_title(db_obj) or db_title
         if not _is_notas_database(title):
             continue
-        context = _infer_context([*breadcrumb, title])
         try:
             rows = _query_database_rows(notion, db_id, database_obj=db_obj)
         except Exception as exc:  # noqa: BLE001
@@ -455,7 +455,43 @@ def carregar_notas_notion(logger: Optional[LogFn] = None) -> List[RegistroNota]:
         if not rows:
             continue
 
-        _log(logger, f"Database {title or db_id}: {len(rows)} alunos encontrados")
+        context = _infer_context([*breadcrumb, title])
+        candidatos.append(
+            {
+                "db_id": db_id,
+                "title": title,
+                "context": context,
+                "rows": rows,
+            }
+        )
+
+    if not candidatos:
+        return registros
+
+    # Em caso de bases duplicadas com o mesmo titulo, processa apenas a com mais linhas.
+    deduplicadas: Dict[str, Dict[str, Any]] = {}
+    duplicadas_ignoradas = 0
+    for candidato in candidatos:
+        key = _normalize(candidato["title"])
+        atual = deduplicadas.get(key)
+        if atual is None:
+            deduplicadas[key] = candidato
+            continue
+
+        if len(candidato["rows"]) > len(atual["rows"]):
+            deduplicadas[key] = candidato
+            duplicadas_ignoradas += 1
+        else:
+            duplicadas_ignoradas += 1
+
+    if duplicadas_ignoradas:
+        _log(logger, f"Aviso: {duplicadas_ignoradas} database(s) duplicada(s) foram ignoradas automaticamente.")
+
+    for item in deduplicadas.values():
+        title = item["title"]
+        context = item["context"]
+        rows = item["rows"]
+        _log(logger, f"Database {title}: {len(rows)} alunos encontrados")
 
         for row in rows:
             props = row.get("properties", {})
