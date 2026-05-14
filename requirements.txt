@@ -1,1 +1,5 @@
 notion-client
+openpyxl
+playwright
+streamlit
+python-dotenv

@@ -834,7 +834,10 @@ def main() -> int:
     try:
         resultado = executar_lancamento(filtro=filtro, logger=logger, dry_run=args.dry_run)
     except LancamentoError as exc:
-        if "Nenhuma nota valida foi encontrada no Notion." in str(exc):
+        if (
+            "Nenhuma nota valida foi encontrada no Notion." in str(exc)
+            or "Nenhuma nota encontrada para o filtro selecionado." in str(exc)
+        ):
             aviso = "Sem notas validas para lancar no Notion. Encerrando sem alteracoes."
             print(f"Aviso: {aviso}")
             if args.notion_page_id:
