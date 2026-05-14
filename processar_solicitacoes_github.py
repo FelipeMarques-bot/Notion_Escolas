@@ -118,6 +118,8 @@ def main() -> int:
         print("Nenhuma solicitacao pendente encontrada.")
         return 0
 
+    had_errors = False
+
     for req in all_requests:
         page_id = req["page_id"]
         escola = req["escola"]
@@ -125,6 +127,7 @@ def main() -> int:
         if not escola:
             if not page_id:
                 print("Erro: MANUAL_ESCOLA vazio.")
+                had_errors = True
                 continue
             atualizar_status_execucao_notion(
                 page_id=page_id,
@@ -133,6 +136,7 @@ def main() -> int:
                 clear_request=True,
             )
             print(f"Solicitacao {page_id}: erro por campo Escola vazio")
+            had_errors = True
             continue
 
         if page_id:
@@ -180,6 +184,7 @@ def main() -> int:
                     clear_request=True,
                 )
             print(f"Erro em {escola}: {exc}")
+            had_errors = True
         except Exception as exc:  # noqa: BLE001
             if page_id:
                 atualizar_status_execucao_notion(
@@ -189,8 +194,9 @@ def main() -> int:
                     clear_request=True,
                 )
             print(f"Erro inesperado em {escola}: {exc}")
+            had_errors = True
 
-    return 0
+    return 1 if had_errors else 0
 
 
 if __name__ == "__main__":
