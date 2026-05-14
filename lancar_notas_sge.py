@@ -127,6 +127,11 @@ def _safe_notion_call(fn):
         try:
             return fn()
         except Exception as exc:  # noqa: BLE001
+            msg = str(exc).lower()
+            if "api token is invalid" in msg or "unauthorized" in msg:
+                raise LancamentoError(
+                    "NOTION_TOKEN invalido no ambiente de execucao. Atualize o secret NOTION_TOKEN no GitHub Actions."
+                ) from exc
             last = exc
             if idx == retry:
                 break
