@@ -56,8 +56,14 @@ jobs:
           SGE_CPF: ${{ secrets.SGE_CPF }}
           SGE_SENHA: ${{ secrets.SGE_SENHA }}
         run: |
-          if [ -z "$NOTION_TOKEN" ] || [ -z "$ROOT_PAGE_ID" ] || [ -z "$SGE_CPF" ] || [ -z "$SGE_SENHA" ]; then
-            echo "Error: missing one or more required secrets: NOTION_TOKEN, ROOT_PAGE_ID, SGE_CPF, SGE_SENHA"
+          MISSING=""
+          if [ -z "$NOTION_TOKEN" ]; then MISSING="$MISSING NOTION_TOKEN"; fi
+          if [ -z "$ROOT_PAGE_ID" ]; then MISSING="$MISSING ROOT_PAGE_ID"; fi
+          if [ -z "$SGE_CPF" ]; then MISSING="$MISSING SGE_CPF"; fi
+          if [ -z "$SGE_SENHA" ]; then MISSING="$MISSING SGE_SENHA"; fi
+
+          if [ -n "$MISSING" ]; then
+            echo "Error: missing required secrets:$MISSING"
             exit 1
           fi
 
