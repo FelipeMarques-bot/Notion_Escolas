@@ -367,17 +367,9 @@ def propriedades_database_alunos(nome_coluna_titulo="Nome do Aluno"):
             {"name": "In review", "color": "blue"},
             {"name": "Complete", "color": "green"},
         ]}},
-        "Grupo/Tema": {"rich_text": {}},
         "Atividade 1": {"rich_text": {}},
         "Status lancamento 1": {"select": {"options": [
             {"name": "Lancada", "color": "green"},
-        ]}},
-        "Critérios nota 1": {"number": {"format": "number"}},
-        "Status 1": {"select": {"options": [
-            {"name": "Entregue",          "color": "green"},
-            {"name": "Não Entregue",      "color": "red"},
-            {"name": "Faltou",            "color": "orange"},
-            {"name": "Falta Justificada", "color": "yellow"},
         ]}},
         "Data realização 1": {"date": {}},
         "Observações 1": {"rich_text": {}},
@@ -385,35 +377,14 @@ def propriedades_database_alunos(nome_coluna_titulo="Nome do Aluno"):
         "Status lancamento 2": {"select": {"options": [
             {"name": "Lancada", "color": "green"},
         ]}},
-        "Critérios nota 2": {"number": {"format": "number"}},
-        "Status 2": {"select": {"options": [
-            {"name": "Entregue",          "color": "green"},
-            {"name": "Não Entregue",      "color": "red"},
-            {"name": "Faltou",            "color": "orange"},
-            {"name": "Falta Justificada", "color": "yellow"},
-        ]}},
         "Data realização 2": {"date": {}},
         "Observações 2": {"rich_text": {}},
         "Atividade 3": {"rich_text": {}},
         "Status lancamento 3": {"select": {"options": [
             {"name": "Lancada", "color": "green"},
         ]}},
-        "Critérios nota 3": {"number": {"format": "number"}},
-        "Status 3": {"select": {"options": [
-            {"name": "Entregue",          "color": "green"},
-            {"name": "Não Entregue",      "color": "red"},
-            {"name": "Faltou",            "color": "orange"},
-            {"name": "Falta Justificada", "color": "yellow"},
-        ]}},
         "Data realização 3": {"date": {}},
         "Observações 3": {"rich_text": {}},
-        "Média do Trimestre": {"number": {"format": "number"}},
-        "Situação": {"select": {"options": [
-            {"name": "Aprovado", "color": "green"},
-            {"name": "Recuperação", "color": "yellow"},
-            {"name": "Crítico", "color": "red"},
-        ]}},
-        "Plano de Ação": {"rich_text": {}},
         "Última Atualização": {"last_edited_time": {}},
     }
 
