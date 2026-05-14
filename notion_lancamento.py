@@ -376,6 +376,9 @@ def propriedades_database_alunos(nome_coluna_titulo="Nome do Aluno"):
             {"name": "Faltou",            "color": "orange"},
             {"name": "Falta Justificada", "color": "yellow"},
         ]}},
+        "Status lancamento 1": {"select": {"options": [
+            {"name": "Lancada", "color": "green"},
+        ]}},
         "Data realização 1": {"date": {}},
         "Observações 1": {"rich_text": {}},
         "Atividade 2": {"rich_text": {}},
@@ -386,6 +389,9 @@ def propriedades_database_alunos(nome_coluna_titulo="Nome do Aluno"):
             {"name": "Faltou",            "color": "orange"},
             {"name": "Falta Justificada", "color": "yellow"},
         ]}},
+        "Status lancamento 2": {"select": {"options": [
+            {"name": "Lancada", "color": "green"},
+        ]}},
         "Data realização 2": {"date": {}},
         "Observações 2": {"rich_text": {}},
         "Atividade 3": {"rich_text": {}},
@@ -395,6 +401,9 @@ def propriedades_database_alunos(nome_coluna_titulo="Nome do Aluno"):
             {"name": "Não Entregue",      "color": "red"},
             {"name": "Faltou",            "color": "orange"},
             {"name": "Falta Justificada", "color": "yellow"},
+        ]}},
+        "Status lancamento 3": {"select": {"options": [
+            {"name": "Lancada", "color": "green"},
         ]}},
         "Data realização 3": {"date": {}},
         "Observações 3": {"rich_text": {}},

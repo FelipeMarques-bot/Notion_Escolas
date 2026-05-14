@@ -5,7 +5,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from notion_client import Client
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -64,6 +64,8 @@ class RegistroNota:
     aluno: str
     atividade: str
     nota: float
+    notion_page_id: str = ""
+    notion_status_prop: str = ""
 
 
 @dataclass
@@ -136,6 +138,14 @@ def _to_float(value: object) -> Optional[float]:
         except ValueError:
             return None
     return None
+
+
+def _status_prop_for_activity(atividade: str) -> str:
+    texto = (atividade or "").strip().lower()
+    match = re.search(r"(\d+)\s*$", texto)
+    if match and match.group(1) in {"1", "2", "3"}:
+        return f"Status lancamento {match.group(1)}"
+    return "Status lancamento"
 
 
 def _safe_notion_call(fn):
@@ -625,6 +635,8 @@ def carregar_notas_notion(logger: Optional[LogFn] = None) -> List[RegistroNota]:
                         aluno=aluno,
                         atividade=col_name.strip(),
                         nota=nota,
+                        notion_page_id=row.get("id", ""),
+                        notion_status_prop=_status_prop_for_activity(col_name.strip()),
                     )
                 )
 
@@ -821,6 +833,57 @@ def _fill_grade_for_student(page, aluno: str, nota: float, logger: Optional[LogF
         return False
 
 
+def _update_launch_status_for_notes(registros: List[RegistroNota], logger: Optional[LogFn]) -> None:
+    if not registros:
+        return
+    if not NOTION_TOKEN:
+        _log(logger, "Aviso: NOTION_TOKEN ausente; status de lancamento nao foi atualizado.")
+        return
+
+    notion = Client(auth=NOTION_TOKEN)
+    atualizados = 0
+    falhas = 0
+    vistos = set()
+
+    for reg in registros:
+        page_id = _normalize_notion_id(reg.notion_page_id)
+        status_prop = (reg.notion_status_prop or "").strip()
+        if not page_id or not status_prop:
+            continue
+
+        chave = (page_id, status_prop)
+        if chave in vistos:
+            continue
+        vistos.add(chave)
+
+        try:
+            page = _safe_notion_call(lambda page_id=page_id: notion.pages.retrieve(page_id=page_id))
+            props = page.get("properties", {})
+            prop_info = props.get(status_prop, {})
+            ptype = prop_info.get("type")
+
+            if ptype == "select":
+                payload = {status_prop: {"select": {"name": "Lancada"}}}
+            elif ptype == "checkbox":
+                payload = {status_prop: {"checkbox": True}}
+            elif ptype == "rich_text":
+                payload = {status_prop: {"rich_text": _make_rich_text("Lancada")}}
+            else:
+                _log(logger, f"Aviso: propriedade de status nao encontrada/compativel para {reg.aluno}: {status_prop}")
+                falhas += 1
+                continue
+
+            _safe_notion_call(
+                lambda page_id=page_id, payload=payload: notion.pages.update(page_id=page_id, properties=payload)
+            )
+            atualizados += 1
+        except Exception as exc:  # noqa: BLE001
+            falhas += 1
+            _log(logger, f"Aviso: falha ao atualizar status de lancamento ({reg.aluno}): {exc}")
+
+    _log(logger, f"Status de lancamento atualizado em {atualizados} nota(s). Falhas: {falhas}")
+
+
 def _confirm_save(page, logger: Optional[LogFn]) -> None:
     submit = _first_visible(
         page,
@@ -899,14 +962,17 @@ def executar_lancamento(
             _select_context(page, contexto, logger=logger)
             _select_activity(page, atividade, logger=logger)
 
+            regs_ok_bloco: List[RegistroNota] = []
             for reg in itens:
                 ok = _fill_grade_for_student(page, reg.aluno, reg.nota, logger=logger)
                 if ok:
                     notas_ok += 1
+                    regs_ok_bloco.append(reg)
                 else:
                     falhas += 1
 
             _confirm_save(page, logger=logger)
+            _update_launch_status_for_notes(regs_ok_bloco, logger=logger)
 
         context.close()
         browser.close()
