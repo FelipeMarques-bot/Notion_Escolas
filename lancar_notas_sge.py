@@ -436,7 +436,11 @@ def carregar_notas_notion(logger: Optional[LogFn] = None) -> List[RegistroNota]:
         if not _is_notas_database(title):
             continue
         context = _infer_context([*breadcrumb, title])
-        rows = _query_database_rows(notion, db_id, database_obj=db_obj)
+        try:
+            rows = _query_database_rows(notion, db_id, database_obj=db_obj)
+        except Exception as exc:  # noqa: BLE001
+            _log(logger, f"Aviso: pulando database inacessivel {title or db_id}: {exc}")
+            continue
 
         if not rows:
             continue
