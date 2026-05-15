@@ -883,6 +883,7 @@ def _click_text(page, text: str) -> bool:
 
 def _login_sge(page, logger: Optional[LogFn]) -> None:
     login_url = _resolve_sge_login_url(logger=logger)
+    _log(logger, f"URL de login SGE resolvida: {login_url}")
     _log(logger, "Abrindo pagina de login do SGE...")
     page.goto(login_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
 

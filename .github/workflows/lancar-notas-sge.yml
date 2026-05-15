@@ -50,6 +50,10 @@ on:
         description: Page ID da linha de solicitacao no Notion (opcional; vazio busca automaticamente pela escola)
         required: false
         type: string
+      sge_login_url:
+        description: URL completa da pagina de login do SGE (opcional; sobrescreve o secret)
+        required: false
+        type: string
       dry_run:
         description: Executa sem enviar ao SGE
         required: false
@@ -106,7 +110,7 @@ jobs:
           ROOT_PAGE_ID: ${{ secrets.ROOT_PAGE_ID }}
           SGE_CPF: ${{ secrets.SGE_CPF }}
           SGE_SENHA: ${{ secrets.SGE_SENHA }}
-          SGE_LOGIN_URL: ${{ secrets.SGE_LOGIN_URL }}
+          SGE_LOGIN_URL: ${{ github.event.inputs.sge_login_url || secrets.SGE_LOGIN_URL }}
           HEADLESS: "1"
           SGE_DEBUG_LOGIN: "1"
           SGE_DEBUG_DIR: artifacts/sge-login
