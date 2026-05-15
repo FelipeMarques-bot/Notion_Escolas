@@ -381,7 +381,11 @@ def _list_children(notion: Client, block_id: str) -> List[Dict]:
     return items
 
 
-def _discover_databases(notion: Client, root_page_id: str) -> List[Tuple[str, List[str], str]]:
+def _discover_databases(
+    notion: Client,
+    root_page_id: str,
+    logger: Optional[LogFn] = None,
+) -> List[Tuple[str, List[str], str]]:
     queue: List[Tuple[str, List[str]]] = [(root_page_id, ["ROOT"])]
     visited_pages = set()
     databases: List[Tuple[str, List[str], str]] = []
@@ -392,7 +396,14 @@ def _discover_databases(notion: Client, root_page_id: str) -> List[Tuple[str, Li
             continue
         visited_pages.add(page_id)
 
-        children = _list_children(notion, page_id)
+        try:
+            children = _list_children(notion, page_id)
+        except Exception as exc:  # noqa: BLE001
+            _log(
+                logger,
+                f"Aviso: pagina/bloco inacessivel no Notion durante descoberta ({page_id}): {exc}",
+            )
+            continue
         for block in children:
             btype = block.get("type")
 
@@ -542,7 +553,7 @@ def carregar_notas_notion(logger: Optional[LogFn] = None) -> List[RegistroNota]:
 
     notion = Client(auth=NOTION_TOKEN)
     _log(logger, "Conectando ao Notion e descobrindo databases...")
-    databases = _discover_databases(notion, root_page_id)
+    databases = _discover_databases(notion, root_page_id, logger=logger)
 
     if not databases:
         raise LancamentoError("Nenhuma database foi encontrada a partir de ROOT_PAGE_ID.")
@@ -674,7 +685,7 @@ def listar_contextos_disponiveis(logger: Optional[LogFn] = None) -> List[Dict[st
 
     notion = Client(auth=NOTION_TOKEN)
     _log(logger, "Nenhuma nota valida encontrada. Listando contextos pela estrutura das databases...")
-    databases = _discover_databases(notion, root_page_id)
+    databases = _discover_databases(notion, root_page_id, logger=logger)
 
     contextos = set()
     for db_id, breadcrumb, db_title in databases:
