@@ -138,6 +138,18 @@ def _resolve_sge_login_url(logger: Optional[LogFn] = None) -> str:
         _log(logger, f"Aviso: SGE_LOGIN_URL vazia; usando padrao {DEFAULT_SGE_LOGIN_URL}")
         return DEFAULT_SGE_LOGIN_URL
 
+    # Corrige quando o valor do secret vem no formato de atribuicao, ex.:
+    # "SGE_LOGIN_URL=https//www.sge8147.com.br/"
+    if "=" in raw and re.match(r"^[A-Za-z_][A-Za-z0-9_]*\s*=", raw):
+        raw = raw.split("=", 1)[1].strip().strip('"').strip("'")
+
+    # Corrige esquema sem ':' (https// ou http//).
+    raw = re.sub(r"^https//", "https://", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"^http//", "http://", raw, flags=re.IGNORECASE)
+
+    # Corrige esquema com apenas uma barra (https:/dominio).
+    raw = re.sub(r"^(https?):/([^/])", r"\1://\2", raw, flags=re.IGNORECASE)
+
     if not re.match(r"^https?://", raw, flags=re.IGNORECASE):
         raw = f"https://{raw}"
 
