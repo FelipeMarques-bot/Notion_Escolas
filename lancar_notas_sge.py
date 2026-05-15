@@ -28,6 +28,7 @@ ROOT_PAGE_ID = os.environ.get("ROOT_PAGE_ID", "")
 SGE_CPF = os.environ.get("SGE_CPF", "")
 SGE_SENHA = os.environ.get("SGE_SENHA", "")
 DEFAULT_SGE_LOGIN_URL = "https://www.sge8147.com.br/hportalprofessor.aspx"
+CANONICAL_SGE_LOGIN_URL = "https://www.sge8147.com.br/hlogin8147.aspx"
 SGE_LOGIN_URL = os.environ.get("SGE_LOGIN_URL", DEFAULT_SGE_LOGIN_URL)
 HEADLESS = os.environ.get("HEADLESS", "1") == "1"
 NAV_TIMEOUT_MS = int(os.environ.get("NAV_TIMEOUT_MS", "35000"))
@@ -788,6 +789,8 @@ def _iter_scopes(page):
 
 def _find_login_inputs(page):
     user_selectors = [
+        "#_USUCOD",
+        "input[name='_USUCOD']",
         "input[name*='cpf' i]",
         "input[id*='cpf' i]",
         "input[placeholder*='cpf' i]",
@@ -798,6 +801,8 @@ def _find_login_inputs(page):
         "input[type='text']",
     ]
     password_selectors = [
+        "#_USUSENHATELA",
+        "input[name='_USUSENHATELA']",
         "input[name*='senha' i]",
         "input[id*='senha' i]",
         "input[placeholder*='senha' i]",
@@ -859,6 +864,37 @@ def _capture_login_debug(page, logger: Optional[LogFn]) -> None:
         _log(logger, f"Aviso: falha ao salvar diagnostico de login: {exc}")
 
 
+def _is_session_lost_page(page) -> bool:
+    url = (page.url or "").lower()
+    if "htelaperdeusessao.aspx" in url:
+        return True
+    try:
+        return page.locator("input[name='BUTTON1'][type='submit']").count() > 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _ensure_login_form_available(page, logger: Optional[LogFn]) -> None:
+    _, cpf_input, senha_input = _find_login_inputs(page)
+    if cpf_input is not None and senha_input is not None:
+        return
+
+    if _is_session_lost_page(page):
+        _log(logger, "Sessao expirada detectada no SGE; tentando reconectar para tela de login...")
+        try:
+            page.locator("input[name='BUTTON1'][type='submit']").first.click(timeout=ACTION_TIMEOUT_MS)
+            page.wait_for_load_state("domcontentloaded", timeout=NAV_TIMEOUT_MS)
+        except Exception:  # noqa: BLE001
+            pass
+
+    _, cpf_input, senha_input = _find_login_inputs(page)
+    if cpf_input is not None and senha_input is not None:
+        return
+
+    _log(logger, f"Formulario de login nao encontrado em {page.url}; abrindo URL canonica {CANONICAL_SGE_LOGIN_URL}")
+    page.goto(CANONICAL_SGE_LOGIN_URL, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+
+
 def _click_text(page, text: str) -> bool:
     text = text.strip()
     if not text:
@@ -886,6 +922,7 @@ def _login_sge(page, logger: Optional[LogFn]) -> None:
     _log(logger, f"URL de login SGE resolvida: {login_url}")
     _log(logger, "Abrindo pagina de login do SGE...")
     page.goto(login_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+    _ensure_login_form_available(page, logger=logger)
 
     scope = None
     cpf_input = None
