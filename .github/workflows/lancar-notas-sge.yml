@@ -108,6 +108,8 @@ jobs:
           SGE_SENHA: ${{ secrets.SGE_SENHA }}
           SGE_LOGIN_URL: ${{ secrets.SGE_LOGIN_URL }}
           HEADLESS: "1"
+          SGE_DEBUG_LOGIN: "1"
+          SGE_DEBUG_DIR: artifacts/sge-login
           INPUT_ESCOLA: ${{ github.event.inputs.escola || '' }}
           INPUT_TURNO: ${{ github.event.inputs.turno || '' }}
           INPUT_TURMA: ${{ github.event.inputs.turma || '' }}
@@ -126,3 +128,11 @@ jobs:
 
           echo "Executando python ${ARGS[*]}"
           python "${ARGS[@]}"
+
+      - name: Upload login debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sge-login-debug-${{ github.run_id }}
+          path: artifacts/sge-login/
+          if-no-files-found: ignore

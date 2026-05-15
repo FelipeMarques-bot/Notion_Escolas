@@ -32,6 +32,8 @@ SGE_LOGIN_URL = os.environ.get("SGE_LOGIN_URL", DEFAULT_SGE_LOGIN_URL)
 HEADLESS = os.environ.get("HEADLESS", "1") == "1"
 NAV_TIMEOUT_MS = int(os.environ.get("NAV_TIMEOUT_MS", "35000"))
 ACTION_TIMEOUT_MS = int(os.environ.get("ACTION_TIMEOUT_MS", "9000"))
+DEBUG_LOGIN = os.environ.get("SGE_DEBUG_LOGIN", "1" if os.environ.get("GITHUB_ACTIONS") == "true" else "0") == "1"
+DEBUG_OUTPUT_DIR = os.environ.get("SGE_DEBUG_DIR", "artifacts/sge-login")
 NOTION_STATUS_PROP = os.environ.get("NOTION_STATUS_PROP", "Status lancamento")
 NOTION_LAST_RUN_PROP = os.environ.get("NOTION_LAST_RUN_PROP", "Ultima execucao")
 NOTION_LAUNCH_DATE_PROP = os.environ.get("NOTION_LAUNCH_DATE_PROP", "Data lancamento")
@@ -768,8 +770,93 @@ def _first_visible(page, selectors: List[str]):
     for selector in selectors:
         loc = page.locator(selector)
         if loc.count() > 0:
-            return loc.first
+            try:
+                if loc.first.is_visible():
+                    return loc.first
+            except Exception:  # noqa: BLE001
+                continue
     return None
+
+
+def _iter_scopes(page):
+    scopes = [page]
+    for frame in page.frames:
+        if frame != page.main_frame:
+            scopes.append(frame)
+    return scopes
+
+
+def _find_login_inputs(page):
+    user_selectors = [
+        "input[name*='cpf' i]",
+        "input[id*='cpf' i]",
+        "input[placeholder*='cpf' i]",
+        "input[name*='usuario' i]",
+        "input[id*='usuario' i]",
+        "input[placeholder*='usuario' i]",
+        "input[type='tel']",
+        "input[type='text']",
+    ]
+    password_selectors = [
+        "input[name*='senha' i]",
+        "input[id*='senha' i]",
+        "input[placeholder*='senha' i]",
+        "input[type='password']",
+    ]
+
+    for scope in _iter_scopes(page):
+        user_input = _first_visible(scope, user_selectors)
+        password_input = _first_visible(scope, password_selectors)
+        if user_input is not None and password_input is not None:
+            return scope, user_input, password_input
+    return None, None, None
+
+
+def _capture_login_debug(page, logger: Optional[LogFn]) -> None:
+    if not DEBUG_LOGIN:
+        return
+
+    try:
+        os.makedirs(DEBUG_OUTPUT_DIR, exist_ok=True)
+        screenshot_path = os.path.join(DEBUG_OUTPUT_DIR, "login_failure.png")
+        html_path = os.path.join(DEBUG_OUTPUT_DIR, "login_failure.html")
+        info_path = os.path.join(DEBUG_OUTPUT_DIR, "login_failure_info.txt")
+
+        page.screenshot(path=screenshot_path, full_page=True)
+        with open(html_path, "w", encoding="utf-8") as f:
+            f.write(page.content())
+
+        lines = [f"URL atual: {page.url}"]
+        lines.append(f"Frames encontrados: {len(page.frames)}")
+        for idx, frame in enumerate(page.frames):
+            lines.append(f"- frame[{idx}] name={frame.name!r} url={frame.url}")
+
+        for scope in _iter_scopes(page):
+            try:
+                kinds = {
+                    "password": scope.locator("input[type='password']").count(),
+                    "text": scope.locator("input[type='text']").count(),
+                    "tel": scope.locator("input[type='tel']").count(),
+                    "submit": scope.locator("button[type='submit'], input[type='submit']").count(),
+                }
+                lines.append(
+                    "scope="
+                    f"{getattr(scope, 'url', 'about:blank')} | "
+                    f"inputs(password/text/tel)={kinds['password']}/{kinds['text']}/{kinds['tel']} | "
+                    f"submit={kinds['submit']}"
+                )
+            except Exception as exc:  # noqa: BLE001
+                lines.append(f"scope-inspect-error: {exc}")
+
+        with open(info_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+
+        _log(
+            logger,
+            "Diagnostico de login salvo em artifacts/sge-login (screenshot/html/info).",
+        )
+    except Exception as exc:  # noqa: BLE001
+        _log(logger, f"Aviso: falha ao salvar diagnostico de login: {exc}")
 
 
 def _click_text(page, text: str) -> bool:
@@ -799,33 +886,27 @@ def _login_sge(page, logger: Optional[LogFn]) -> None:
     _log(logger, "Abrindo pagina de login do SGE...")
     page.goto(login_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
 
-    cpf_input = _first_visible(
-        page,
-        [
-            "input[name*='cpf' i]",
-            "input[id*='cpf' i]",
-            "input[placeholder*='cpf' i]",
-            "input[type='text']",
-        ],
-    )
-    senha_input = _first_visible(
-        page,
-        [
-            "input[name*='senha' i]",
-            "input[id*='senha' i]",
-            "input[placeholder*='senha' i]",
-            "input[type='password']",
-        ],
-    )
+    scope = None
+    cpf_input = None
+    senha_input = None
+    deadline = time.time() + (NAV_TIMEOUT_MS / 1000)
+    while time.time() < deadline:
+        scope, cpf_input, senha_input = _find_login_inputs(page)
+        if cpf_input is not None and senha_input is not None:
+            break
+        page.wait_for_timeout(300)
 
-    if cpf_input is None or senha_input is None:
-        raise LancamentoError("Nao foi possivel localizar os campos de login no SGE.")
+    if cpf_input is None or senha_input is None or scope is None:
+        _capture_login_debug(page, logger=logger)
+        raise LancamentoError(
+            f"Nao foi possivel localizar os campos de login no SGE. URL atual: {page.url}"
+        )
 
     cpf_input.fill(SGE_CPF, timeout=ACTION_TIMEOUT_MS)
     senha_input.fill(SGE_SENHA, timeout=ACTION_TIMEOUT_MS)
 
     submit = _first_visible(
-        page,
+        scope,
         [
             "button[type='submit']",
             "input[type='submit']",
@@ -834,6 +915,17 @@ def _login_sge(page, logger: Optional[LogFn]) -> None:
             "button:has-text('Login')",
         ],
     )
+    if submit is None:
+        submit = _first_visible(
+            page,
+            [
+                "button[type='submit']",
+                "input[type='submit']",
+                "button:has-text('Entrar')",
+                "button:has-text('Acessar')",
+                "button:has-text('Login')",
+            ],
+        )
     if submit is None:
         raise LancamentoError("Nao foi possivel localizar botao de login no SGE.")
 
