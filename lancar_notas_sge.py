@@ -2,6 +2,7 @@ import argparse
 import os
 import re
 import time
+import unicodedata
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -102,7 +103,12 @@ def _is_placeholder_env(value: str) -> bool:
 
 
 def _normalize(s: str) -> str:
-    return re.sub(r"\s+", " ", s.strip().lower())
+    text = (s or "").strip().lower()
+    # Uniformiza ordinais usados em serie/trimestre: 6º == 6o, 2° == 2o.
+    text = text.replace("º", "o").replace("°", "o").replace("ª", "a")
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    return re.sub(r"\s+", " ", text)
 
 
 def _normalize_notion_id(value: str) -> str:
