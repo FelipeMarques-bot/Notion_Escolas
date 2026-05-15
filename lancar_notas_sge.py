@@ -41,6 +41,8 @@ NOTION_LAUNCH_DATE_PROP = os.environ.get("NOTION_LAUNCH_DATE_PROP", "Data lancam
 NOTION_LOG_PROP = os.environ.get("NOTION_LOG_PROP", "Log execucao")
 NOTION_REQUEST_PROP = os.environ.get("NOTION_REQUEST_PROP", "Solicitar lancamento")
 
+_DEBUG_CAPTURED_STAGES: set[str] = set()
+
 TURNOS_KNOWN = ["Matutino", "Vespertino", "Noturno", "Integral"]
 TRIMESTRES_KNOWN = [
     "1o Trimestre",
@@ -114,6 +116,12 @@ def _normalize(s: str) -> str:
     text = unicodedata.normalize("NFKD", text)
     text = "".join(ch for ch in text if not unicodedata.combining(ch))
     return re.sub(r"\s+", " ", text)
+
+
+def _normalize_loose(s: str) -> str:
+    text = _normalize(s)
+    text = re.sub(r"[^a-z0-9\s]", "", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def _normalize_notion_id(value: str) -> str:
@@ -864,6 +872,46 @@ def _capture_login_debug(page, logger: Optional[LogFn]) -> None:
         _log(logger, f"Aviso: falha ao salvar diagnostico de login: {exc}")
 
 
+def _capture_stage_debug(page, stage: str, logger: Optional[LogFn]) -> None:
+    if not DEBUG_LOGIN:
+        return
+    if stage in _DEBUG_CAPTURED_STAGES:
+        return
+
+    _DEBUG_CAPTURED_STAGES.add(stage)
+
+    try:
+        os.makedirs(DEBUG_OUTPUT_DIR, exist_ok=True)
+        screenshot_path = os.path.join(DEBUG_OUTPUT_DIR, f"{stage}.png")
+        html_path = os.path.join(DEBUG_OUTPUT_DIR, f"{stage}.html")
+        info_path = os.path.join(DEBUG_OUTPUT_DIR, f"{stage}_info.txt")
+
+        page.screenshot(path=screenshot_path, full_page=True)
+        with open(html_path, "w", encoding="utf-8") as f:
+            f.write(page.content())
+
+        lines = [f"stage={stage}", f"url={page.url}", f"frames={len(page.frames)}"]
+        for idx, frame in enumerate(page.frames):
+            lines.append(f"frame[{idx}] name={frame.name!r} url={frame.url}")
+            try:
+                links = frame.locator("a")
+                total_links = min(links.count(), 25)
+                lines.append(f"frame[{idx}] sample_links={total_links}")
+                for i in range(total_links):
+                    txt = (links.nth(i).inner_text(timeout=200) or "").strip()
+                    if txt:
+                        lines.append(f"  - {txt}")
+            except Exception:  # noqa: BLE001
+                continue
+
+        with open(info_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+
+        _log(logger, f"Diagnostico da etapa '{stage}' salvo em {DEBUG_OUTPUT_DIR}.")
+    except Exception as exc:  # noqa: BLE001
+        _log(logger, f"Aviso: falha ao salvar diagnostico da etapa {stage}: {exc}")
+
+
 def _is_session_lost_page(page) -> bool:
     url = (page.url or "").lower()
     if "htelaperdeusessao.aspx" in url:
@@ -1018,6 +1066,7 @@ def _select_activity(page, atividade: str, logger: Optional[LogFn]) -> None:
         return
 
     alvo_norm = _normalize(atividade)
+    alvo_loose = _normalize_loose(atividade)
     for scope in _iter_scopes(page):
         links = scope.locator("a")
         total_links = links.count()
@@ -1028,17 +1077,40 @@ def _select_activity(page, atividade: str, logger: Optional[LogFn]) -> None:
                 if not texto:
                     continue
                 texto_norm = _normalize(texto)
+                texto_loose = _normalize_loose(texto)
                 if alvo_norm and (alvo_norm in texto_norm or texto_norm in alvo_norm):
                     link.click(timeout=ACTION_TIMEOUT_MS)
                     page.wait_for_timeout(700)
                     return
-                if alvo_norm == "avaliacao" and "avaliacao" in texto_norm:
+                if alvo_loose and (alvo_loose in texto_loose or texto_loose in alvo_loose):
+                    link.click(timeout=ACTION_TIMEOUT_MS)
+                    page.wait_for_timeout(700)
+                    return
+                if alvo_norm == "avaliacao" and ("avaliacao" in texto_norm or "avali" in texto_loose):
                     link.click(timeout=ACTION_TIMEOUT_MS)
                     page.wait_for_timeout(700)
                     return
             except Exception:  # noqa: BLE001
                 continue
 
+    # Alguns layouts trazem avaliacao como botao submit em vez de link.
+    for scope in _iter_scopes(page):
+        submit = _first_visible(
+            scope,
+            [
+                "input[type='submit'][value*='Avalia']",
+                "button:has-text('Avalia')",
+            ],
+        )
+        if submit is not None:
+            try:
+                submit.click(timeout=ACTION_TIMEOUT_MS)
+                page.wait_for_timeout(700)
+                return
+            except Exception:  # noqa: BLE001
+                continue
+
+    _capture_stage_debug(page, stage="activity_not_found", logger=logger)
     _log(logger, f"Aviso: avaliacao nao encontrada diretamente na tela: {atividade}")
 
 
@@ -1072,6 +1144,7 @@ def _fill_grade_for_student(page, aluno: str, nota: float, logger: Optional[LogF
     nota_texto = str(nota).replace(".", ",")
     row = _find_student_row(page, aluno)
     if row is None:
+        _capture_stage_debug(page, stage="student_not_found", logger=logger)
         _log(logger, f"Aviso: aluno nao localizado na grade: {aluno}")
         return False
 
