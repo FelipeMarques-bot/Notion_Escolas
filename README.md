@@ -16,7 +16,7 @@ Automacao para criar estrutura no Notion e lancar notas no SGE via GitHub Action
 
 Padrao do projeto:
 
-- https://www.sge8147.com.br/
+- https://www.sge8147.com.br/hportalprofessor.aspx
 
 Se precisar trocar, configure a secret/variavel SGE_LOGIN_URL.
 

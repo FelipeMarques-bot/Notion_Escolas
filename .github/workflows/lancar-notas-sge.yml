@@ -53,6 +53,7 @@ on:
       sge_login_url:
         description: URL completa da pagina de login do SGE (opcional; sobrescreve o secret)
         required: false
+        default: "https://www.sge8147.com.br/hportalprofessor.aspx"
         type: string
       dry_run:
         description: Executa sem enviar ao SGE
