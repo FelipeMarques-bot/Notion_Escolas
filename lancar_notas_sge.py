@@ -990,18 +990,67 @@ def _select_context(page, contexto: ContextoTurma, logger: Optional[LogFn]) -> N
 
 def _select_activity(page, atividade: str, logger: Optional[LogFn]) -> None:
     _log(logger, f"Selecionando avaliacao: {atividade}")
-    if not _click_text(page, atividade):
-        _log(logger, f"Aviso: avaliacao nao encontrada diretamente na tela: {atividade}")
+    if _click_text(page, atividade):
+        page.wait_for_timeout(500)
+        return
+
+    alvo_norm = _normalize(atividade)
+    links = page.locator("a")
+    total_links = links.count()
+    for idx in range(total_links):
+        link = links.nth(idx)
+        try:
+            texto = (link.inner_text(timeout=600) or "").strip()
+            if not texto:
+                continue
+            texto_norm = _normalize(texto)
+            if alvo_norm and (alvo_norm in texto_norm or texto_norm in alvo_norm):
+                link.click(timeout=ACTION_TIMEOUT_MS)
+                page.wait_for_timeout(500)
+                return
+            if alvo_norm == "avaliacao" and "avaliacao" in texto_norm:
+                link.click(timeout=ACTION_TIMEOUT_MS)
+                page.wait_for_timeout(500)
+                return
+        except Exception:  # noqa: BLE001
+            continue
+
+    _log(logger, f"Aviso: avaliacao nao encontrada diretamente na tela: {atividade}")
+
+
+def _find_student_row(page, aluno: str):
+    alvo_norm = _normalize(aluno)
+    if not alvo_norm:
+        return None
+
+    # Tentativa rapida por texto exato.
+    direct = page.locator("tr", has_text=aluno)
+    if direct.count() > 0:
+        return direct.first
+
+    # Fallback tolerante a acentos/case/espacos.
+    rows = page.locator("tr")
+    total_rows = rows.count()
+    for idx in range(total_rows):
+        row = rows.nth(idx)
+        try:
+            texto_row = row.inner_text(timeout=400)
+        except Exception:  # noqa: BLE001
+            continue
+        row_norm = _normalize(texto_row)
+        if alvo_norm in row_norm:
+            return row
+    return None
 
 
 def _fill_grade_for_student(page, aluno: str, nota: float, logger: Optional[LogFn]) -> bool:
     nota_texto = str(nota).replace(".", ",")
-    row = page.locator("tr", has_text=aluno)
-    if row.count() == 0:
+    row = _find_student_row(page, aluno)
+    if row is None:
         _log(logger, f"Aviso: aluno nao localizado na grade: {aluno}")
         return False
 
-    inputs = row.first.locator("input[type='text'], input[type='number']")
+    inputs = row.locator("input[type='text'], input[type='number']")
     if inputs.count() == 0:
         _log(logger, f"Aviso: campo de nota nao encontrado para aluno: {aluno}")
         return False
