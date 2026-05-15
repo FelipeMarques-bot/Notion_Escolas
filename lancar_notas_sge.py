@@ -172,6 +172,32 @@ def _resolve_sge_login_url(logger: Optional[LogFn] = None) -> str:
     return raw
 
 
+def _resolve_env_credential(
+    value: str,
+    env_name: str,
+    logger: Optional[LogFn] = None,
+    digits_only: bool = False,
+) -> str:
+    raw = (value or "").strip().strip('"').strip("'")
+    if not raw:
+        return ""
+
+    # Corrige quando o secret vem no formato de atribuicao literal,
+    # por exemplo: "SGE_CPF=997748010".
+    if "=" in raw and re.match(r"^[A-Za-z_][A-Za-z0-9_]*\s*=", raw):
+        left, right = raw.split("=", 1)
+        raw = right.strip().strip('"').strip("'")
+        _log(logger, f"Aviso: {env_name} veio como atribuicao literal; usando apenas o valor.")
+
+    if digits_only:
+        only_digits = re.sub(r"\D", "", raw)
+        if only_digits != raw:
+            _log(logger, f"Aviso: {env_name} continha caracteres extras; usando apenas digitos.")
+        raw = only_digits
+
+    return raw
+
+
 def _to_float(value: object) -> Optional[float]:
     if value is None:
         return None
@@ -988,7 +1014,7 @@ def _click_text_any_scope(page, text: str) -> bool:
     return False
 
 
-def _login_sge(page, logger: Optional[LogFn]) -> None:
+def _login_sge(page, cpf: str, senha: str, logger: Optional[LogFn]) -> None:
     login_url = _resolve_sge_login_url(logger=logger)
     _log(logger, f"URL de login SGE resolvida: {login_url}")
     _log(logger, "Abrindo pagina de login do SGE...")
@@ -1011,8 +1037,8 @@ def _login_sge(page, logger: Optional[LogFn]) -> None:
             f"Nao foi possivel localizar os campos de login no SGE. URL atual: {page.url}"
         )
 
-    cpf_input.fill(SGE_CPF, timeout=ACTION_TIMEOUT_MS)
-    senha_input.fill(SGE_SENHA, timeout=ACTION_TIMEOUT_MS)
+    cpf_input.fill(cpf, timeout=ACTION_TIMEOUT_MS)
+    senha_input.fill(senha, timeout=ACTION_TIMEOUT_MS)
 
     submit = _first_visible(
         scope,
@@ -1265,9 +1291,12 @@ def executar_lancamento(
     logger: Optional[LogFn] = print,
     dry_run: bool = False,
 ) -> Dict[str, int]:
-    if not SGE_CPF or not SGE_SENHA:
+    cpf = _resolve_env_credential(SGE_CPF, "SGE_CPF", logger=logger, digits_only=True)
+    senha = _resolve_env_credential(SGE_SENHA, "SGE_SENHA", logger=logger, digits_only=False)
+
+    if not cpf or not senha:
         raise LancamentoError("Defina SGE_CPF e SGE_SENHA nas variaveis de ambiente.")
-    if _is_placeholder_env(SGE_CPF) or _is_placeholder_env(SGE_SENHA):
+    if _is_placeholder_env(cpf) or _is_placeholder_env(senha):
         raise LancamentoError("SGE_CPF/SGE_SENHA estao com placeholders. Atualize com valores reais.")
 
     registros = carregar_notas_notion(logger=logger)
@@ -1299,7 +1328,7 @@ def executar_lancamento(
         page = context.new_page()
         page.set_default_timeout(ACTION_TIMEOUT_MS)
 
-        _login_sge(page, logger=logger)
+        _login_sge(page, cpf=cpf, senha=senha, logger=logger)
 
         for idx, (key, itens) in enumerate(grouped.items(), start=1):
             escola, turno, turma, trimestre, atividade = key
