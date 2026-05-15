@@ -917,6 +917,29 @@ def _click_text(page, text: str) -> bool:
     return False
 
 
+def _click_text_any_scope(page, text: str) -> bool:
+    text = text.strip()
+    if not text:
+        return False
+
+    for scope in _iter_scopes(page):
+        candidates = [
+            scope.get_by_role("button", name=text),
+            scope.get_by_role("link", name=text),
+            scope.get_by_role("option", name=text),
+            scope.get_by_text(text, exact=True),
+            scope.get_by_text(text, exact=False),
+        ]
+        for loc in candidates:
+            try:
+                if loc.count() > 0:
+                    loc.first.click(timeout=2000)
+                    return True
+            except Exception:  # noqa: BLE001
+                continue
+    return False
+
+
 def _login_sge(page, logger: Optional[LogFn]) -> None:
     login_url = _resolve_sge_login_url(logger=logger)
     _log(logger, f"URL de login SGE resolvida: {login_url}")
@@ -985,35 +1008,36 @@ def _select_context(page, contexto: ContextoTurma, logger: Optional[LogFn]) -> N
     for item in textos:
         if item.startswith("Escola nao") or item.startswith("Turno nao"):
             continue
-        _click_text(page, item)
+        _click_text_any_scope(page, item)
 
 
 def _select_activity(page, atividade: str, logger: Optional[LogFn]) -> None:
     _log(logger, f"Selecionando avaliacao: {atividade}")
-    if _click_text(page, atividade):
+    if _click_text_any_scope(page, atividade):
         page.wait_for_timeout(500)
         return
 
     alvo_norm = _normalize(atividade)
-    links = page.locator("a")
-    total_links = links.count()
-    for idx in range(total_links):
-        link = links.nth(idx)
-        try:
-            texto = (link.inner_text(timeout=600) or "").strip()
-            if not texto:
+    for scope in _iter_scopes(page):
+        links = scope.locator("a")
+        total_links = links.count()
+        for idx in range(total_links):
+            link = links.nth(idx)
+            try:
+                texto = (link.inner_text(timeout=600) or "").strip()
+                if not texto:
+                    continue
+                texto_norm = _normalize(texto)
+                if alvo_norm and (alvo_norm in texto_norm or texto_norm in alvo_norm):
+                    link.click(timeout=ACTION_TIMEOUT_MS)
+                    page.wait_for_timeout(700)
+                    return
+                if alvo_norm == "avaliacao" and "avaliacao" in texto_norm:
+                    link.click(timeout=ACTION_TIMEOUT_MS)
+                    page.wait_for_timeout(700)
+                    return
+            except Exception:  # noqa: BLE001
                 continue
-            texto_norm = _normalize(texto)
-            if alvo_norm and (alvo_norm in texto_norm or texto_norm in alvo_norm):
-                link.click(timeout=ACTION_TIMEOUT_MS)
-                page.wait_for_timeout(500)
-                return
-            if alvo_norm == "avaliacao" and "avaliacao" in texto_norm:
-                link.click(timeout=ACTION_TIMEOUT_MS)
-                page.wait_for_timeout(500)
-                return
-        except Exception:  # noqa: BLE001
-            continue
 
     _log(logger, f"Aviso: avaliacao nao encontrada diretamente na tela: {atividade}")
 
@@ -1023,23 +1047,24 @@ def _find_student_row(page, aluno: str):
     if not alvo_norm:
         return None
 
-    # Tentativa rapida por texto exato.
-    direct = page.locator("tr", has_text=aluno)
-    if direct.count() > 0:
-        return direct.first
+    for scope in _iter_scopes(page):
+        # Tentativa rapida por texto exato.
+        direct = scope.locator("tr", has_text=aluno)
+        if direct.count() > 0:
+            return direct.first
 
-    # Fallback tolerante a acentos/case/espacos.
-    rows = page.locator("tr")
-    total_rows = rows.count()
-    for idx in range(total_rows):
-        row = rows.nth(idx)
-        try:
-            texto_row = row.inner_text(timeout=400)
-        except Exception:  # noqa: BLE001
-            continue
-        row_norm = _normalize(texto_row)
-        if alvo_norm in row_norm:
-            return row
+        # Fallback tolerante a acentos/case/espacos.
+        rows = scope.locator("tr")
+        total_rows = rows.count()
+        for idx in range(total_rows):
+            row = rows.nth(idx)
+            try:
+                texto_row = row.inner_text(timeout=400)
+            except Exception:  # noqa: BLE001
+                continue
+            row_norm = _normalize(texto_row)
+            if alvo_norm in row_norm:
+                return row
     return None
 
 
@@ -1120,12 +1145,29 @@ def _confirm_save(page, logger: Optional[LogFn]) -> None:
     submit = _first_visible(
         page,
         [
+            "button:has-text('Confirma')",
+            "input[type='submit'][value*='Confirma']",
             "button:has-text('Salvar')",
             "button:has-text('Confirmar')",
             "button:has-text('Lancar')",
             "button:has-text('Gravar')",
         ],
     )
+    if submit is None:
+        for scope in _iter_scopes(page):
+            submit = _first_visible(
+                scope,
+                [
+                    "button:has-text('Confirma')",
+                    "input[type='submit'][value*='Confirma']",
+                    "button:has-text('Salvar')",
+                    "button:has-text('Confirmar')",
+                    "button:has-text('Lancar')",
+                    "button:has-text('Gravar')",
+                ],
+            )
+            if submit is not None:
+                break
     if submit is None:
         _log(logger, "Aviso: botao de confirmacao nao encontrado; seguindo para o proximo bloco.")
         return
