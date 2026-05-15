@@ -7,6 +7,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from urllib.parse import urlparse
 
 from notion_client import Client
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -26,7 +27,8 @@ NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "")
 ROOT_PAGE_ID = os.environ.get("ROOT_PAGE_ID", "")
 SGE_CPF = os.environ.get("SGE_CPF", "")
 SGE_SENHA = os.environ.get("SGE_SENHA", "")
-SGE_LOGIN_URL = os.environ.get("SGE_LOGIN_URL", "https://www.sge8147.com.br/")
+DEFAULT_SGE_LOGIN_URL = "https://www.sge8147.com.br/"
+SGE_LOGIN_URL = os.environ.get("SGE_LOGIN_URL", DEFAULT_SGE_LOGIN_URL)
 HEADLESS = os.environ.get("HEADLESS", "1") == "1"
 NAV_TIMEOUT_MS = int(os.environ.get("NAV_TIMEOUT_MS", "35000"))
 ACTION_TIMEOUT_MS = int(os.environ.get("ACTION_TIMEOUT_MS", "9000"))
@@ -128,6 +130,23 @@ def _normalize_notion_id(value: str) -> str:
     if len(token) != 32:
         return raw
     return f"{token[:8]}-{token[8:12]}-{token[12:16]}-{token[16:20]}-{token[20:32]}"
+
+
+def _resolve_sge_login_url(logger: Optional[LogFn] = None) -> str:
+    raw = (SGE_LOGIN_URL or "").strip().strip('"').strip("'")
+    if not raw:
+        _log(logger, f"Aviso: SGE_LOGIN_URL vazia; usando padrao {DEFAULT_SGE_LOGIN_URL}")
+        return DEFAULT_SGE_LOGIN_URL
+
+    if not re.match(r"^https?://", raw, flags=re.IGNORECASE):
+        raw = f"https://{raw}"
+
+    parsed = urlparse(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        _log(logger, f"Aviso: SGE_LOGIN_URL invalida; usando padrao {DEFAULT_SGE_LOGIN_URL}")
+        return DEFAULT_SGE_LOGIN_URL
+
+    return raw
 
 
 def _to_float(value: object) -> Optional[float]:
@@ -764,8 +783,9 @@ def _click_text(page, text: str) -> bool:
 
 
 def _login_sge(page, logger: Optional[LogFn]) -> None:
+    login_url = _resolve_sge_login_url(logger=logger)
     _log(logger, "Abrindo pagina de login do SGE...")
-    page.goto(SGE_LOGIN_URL, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+    page.goto(login_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
 
     cpf_input = _first_visible(
         page,
