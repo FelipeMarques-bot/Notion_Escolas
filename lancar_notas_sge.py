@@ -28,7 +28,11 @@ ROOT_PAGE_ID = os.environ.get("ROOT_PAGE_ID", "")
 SGE_CPF = os.environ.get("SGE_CPF", "")
 SGE_SENHA = os.environ.get("SGE_SENHA", "")
 DEFAULT_SGE_LOGIN_URL = "https://www.sge8147.com.br/hportalprofessor.aspx"
-CANONICAL_SGE_LOGIN_URL = "https://www.sge8147.com.br/hlogin8147.aspx"
+PORTAL_LOGIN_FALLBACK_URLS = [
+    "https://www.sge8147.com.br/hportalprofessor.aspx",
+    "https://www.sge8147.com.br/hPortalProfessor8147.aspx",
+    "https://www.sge8147.com.br/hlogin8147.aspx",
+]
 SGE_LOGIN_URL = os.environ.get("SGE_LOGIN_URL", DEFAULT_SGE_LOGIN_URL)
 HEADLESS = os.environ.get("HEADLESS", "1") == "1"
 NAV_TIMEOUT_MS = int(os.environ.get("NAV_TIMEOUT_MS", "35000"))
@@ -198,6 +202,22 @@ def _resolve_env_credential(
         raw = only_digits
 
     return raw
+
+
+def _normalize_cpf_for_sge(cpf: str, logger: Optional[LogFn] = None) -> str:
+    digits = re.sub(r"\D", "", cpf or "")
+    if not digits:
+        return ""
+
+    # Portal costuma esperar 11 digitos, com zeros a esquerda quando necessario.
+    if len(digits) < 11:
+        padded = digits.zfill(11)
+        _log(logger, f"Aviso: SGE_CPF com {len(digits)} digitos; usando formato com zeros a esquerda ({len(padded)} digitos).")
+        return padded
+    if len(digits) > 11:
+        _log(logger, "Aviso: SGE_CPF com mais de 11 digitos; usando os 11 ultimos.")
+        return digits[-11:]
+    return digits
 
 
 def _to_float(value: object) -> Optional[float]:
@@ -823,19 +843,61 @@ def _iter_scopes(page):
     return scopes
 
 
+def _pick_user_input(scope):
+    # 1) Seletor direto de usuario/cpf quando existir.
+    direct = _first_visible(
+        scope,
+        [
+            "#_USUCOD",
+            "input[name='_USUCOD']",
+            "input[name*='cpf' i]",
+            "input[id*='cpf' i]",
+            "input[placeholder*='cpf' i]",
+            "input[name*='usuario' i]",
+            "input[id*='usuario' i]",
+            "input[placeholder*='usuario' i]",
+        ],
+    )
+    if direct is not None:
+        return direct
+
+    # 2) Heuristica para evitar cair no campo Ano.
+    candidates = scope.locator("input[type='text'], input[type='tel']")
+    best = None
+    best_score = -999
+    total = candidates.count()
+    for idx in range(total):
+        loc = candidates.nth(idx)
+        try:
+            if not loc.is_visible():
+                continue
+            name = (loc.get_attribute("name") or "").lower()
+            iid = (loc.get_attribute("id") or "").lower()
+            placeholder = (loc.get_attribute("placeholder") or "").lower()
+            maxlength = int((loc.get_attribute("maxlength") or "0") or "0")
+            size = int((loc.get_attribute("size") or "0") or "0")
+
+            score = 0
+            bag = f"{name} {iid} {placeholder}"
+            if "ano" in bag:
+                score -= 50
+            if "cpf" in bag or "usuario" in bag:
+                score += 40
+            if maxlength >= 9:
+                score += 10
+            if size >= 9:
+                score += 5
+
+            if score > best_score:
+                best = loc
+                best_score = score
+        except Exception:  # noqa: BLE001
+            continue
+
+    return best
+
+
 def _find_login_inputs(page):
-    user_selectors = [
-        "#_USUCOD",
-        "input[name='_USUCOD']",
-        "input[name*='cpf' i]",
-        "input[id*='cpf' i]",
-        "input[placeholder*='cpf' i]",
-        "input[name*='usuario' i]",
-        "input[id*='usuario' i]",
-        "input[placeholder*='usuario' i]",
-        "input[type='tel']",
-        "input[type='text']",
-    ]
     password_selectors = [
         "#_USUSENHATELA",
         "input[name='_USUSENHATELA']",
@@ -846,7 +908,7 @@ def _find_login_inputs(page):
     ]
 
     for scope in _iter_scopes(page):
-        user_input = _first_visible(scope, user_selectors)
+        user_input = _pick_user_input(scope)
         password_input = _first_visible(scope, password_selectors)
         if user_input is not None and password_input is not None:
             return scope, user_input, password_input
@@ -967,8 +1029,18 @@ def _ensure_login_form_available(page, logger: Optional[LogFn]) -> None:
     if cpf_input is not None and senha_input is not None:
         return
 
-    _log(logger, f"Formulario de login nao encontrado em {page.url}; abrindo URL canonica {CANONICAL_SGE_LOGIN_URL}")
-    page.goto(CANONICAL_SGE_LOGIN_URL, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+    current_url = (page.url or "").strip()
+    for fallback_url in PORTAL_LOGIN_FALLBACK_URLS:
+        if current_url.lower() == fallback_url.lower():
+            continue
+        _log(logger, f"Formulario de login nao encontrado em {page.url}; tentando {fallback_url}")
+        try:
+            page.goto(fallback_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+        except Exception:  # noqa: BLE001
+            continue
+        _, cpf_input, senha_input = _find_login_inputs(page)
+        if cpf_input is not None and senha_input is not None:
+            return
 
 
 def _click_text(page, text: str) -> bool:
@@ -1426,6 +1498,7 @@ def executar_lancamento(
     dry_run: bool = False,
 ) -> Dict[str, int]:
     cpf = _resolve_env_credential(SGE_CPF, "SGE_CPF", logger=logger, digits_only=True)
+    cpf = _normalize_cpf_for_sge(cpf, logger=logger)
     senha = _resolve_env_credential(SGE_SENHA, "SGE_SENHA", logger=logger, digits_only=False)
 
     if not cpf or not senha:
