@@ -1037,6 +1037,16 @@ def _is_login_page(page) -> bool:
         return False
 
 
+def _read_login_error_message(page) -> str:
+    try:
+        err_loc = page.locator(".ErrorViewer")
+        if err_loc.count() > 0:
+            return (err_loc.first.inner_text(timeout=1200) or "").strip()
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
 def _login_sge(page, cpf: str, senha: str, logger: Optional[LogFn]) -> None:
     login_url = _resolve_sge_login_url(logger=logger)
     _log(logger, f"URL de login SGE resolvida: {login_url}")
@@ -1120,13 +1130,52 @@ def _login_sge(page, cpf: str, senha: str, logger: Optional[LogFn]) -> None:
     page.wait_for_timeout(500)
 
     if _is_login_page(page):
-        err = ""
-        try:
-            err_loc = page.locator(".ErrorViewer")
-            if err_loc.count() > 0:
-                err = (err_loc.first.inner_text(timeout=1200) or "").strip()
-        except Exception:  # noqa: BLE001
-            err = ""
+        err = _read_login_error_message(page)
+
+        # SGE costuma normalizar senha para maiusculas no campo. Quando a
+        # credencial foi cadastrada assim, tentar uma segunda vez pode resolver.
+        senha_upper = senha.upper()
+        if "senha inval" in _normalize(err) and senha_upper != senha:
+            _log(logger, "Senha invalida no primeiro envio; tentando novamente com senha em maiusculas...")
+            scope2, cpf_input2, senha_input2 = _find_login_inputs(page)
+            if scope2 is not None and cpf_input2 is not None and senha_input2 is not None:
+                cpf_input2.fill(cpf, timeout=ACTION_TIMEOUT_MS)
+                senha_input2.fill(senha_upper, timeout=ACTION_TIMEOUT_MS)
+                submit2 = _first_visible(
+                    scope2,
+                    [
+                        "input[name='BTNLOGIN']",
+                        "button[type='submit']",
+                        "input[type='submit']",
+                        "button:has-text('Entrar')",
+                        "button:has-text('Acessar')",
+                        "button:has-text('Login')",
+                    ],
+                )
+                if submit2 is None:
+                    submit2 = _first_visible(
+                        page,
+                        [
+                            "input[name='BTNLOGIN']",
+                            "button[type='submit']",
+                            "input[type='submit']",
+                            "button:has-text('Entrar')",
+                            "button:has-text('Acessar')",
+                            "button:has-text('Login')",
+                        ],
+                    )
+                if submit2 is not None:
+                    _dismiss_cookie_banner(page, logger=logger)
+                    submit2.click(timeout=ACTION_TIMEOUT_MS)
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=NAV_TIMEOUT_MS)
+                    except PlaywrightTimeoutError:
+                        pass
+                    page.wait_for_timeout(500)
+                    if not _is_login_page(page):
+                        _log(logger, "Login realizado. Iniciando lancamento...")
+                        return
+                    err = _read_login_error_message(page)
 
         _capture_stage_debug(page, stage="login_failed", logger=logger)
         detalhe = err if err else "permaneceu na tela de login apos submeter credenciais"
