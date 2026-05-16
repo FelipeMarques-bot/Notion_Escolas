@@ -1014,12 +1014,36 @@ def _click_text_any_scope(page, text: str) -> bool:
     return False
 
 
+def _dismiss_cookie_banner(page, logger: Optional[LogFn]) -> None:
+    # Banner de consentimento pode sobrepor a tela de login no CI.
+    labels = ["Concordo", "Aceitar", "OK", "Entendi"]
+    for label in labels:
+        try:
+            if _click_text_any_scope(page, label):
+                _log(logger, f"Banner de cookies detectado; clicado em '{label}'.")
+                page.wait_for_timeout(250)
+                return
+        except Exception:  # noqa: BLE001
+            continue
+
+
+def _is_login_page(page) -> bool:
+    url = (page.url or "").lower()
+    if "hlogin8147.aspx" in url:
+        return True
+    try:
+        return page.locator("input[name='_USUCOD']").count() > 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _login_sge(page, cpf: str, senha: str, logger: Optional[LogFn]) -> None:
     login_url = _resolve_sge_login_url(logger=logger)
     _log(logger, f"URL de login SGE resolvida: {login_url}")
     _log(logger, "Abrindo pagina de login do SGE...")
     page.goto(login_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
     _ensure_login_form_available(page, logger=logger)
+    _dismiss_cookie_banner(page, logger=logger)
 
     scope = None
     cpf_input = None
@@ -1040,9 +1064,28 @@ def _login_sge(page, cpf: str, senha: str, logger: Optional[LogFn]) -> None:
     cpf_input.fill(cpf, timeout=ACTION_TIMEOUT_MS)
     senha_input.fill(senha, timeout=ACTION_TIMEOUT_MS)
 
+    # Confere se o valor realmente ficou no campo usuario.
+    try:
+        cpf_current = (cpf_input.input_value(timeout=ACTION_TIMEOUT_MS) or "").strip()
+    except Exception:  # noqa: BLE001
+        cpf_current = ""
+
+    if not cpf_current:
+        # Fallback via JS para contornar overlays/handlers que limpam o campo.
+        try:
+            page.eval_on_selector(
+                "input[name='_USUCOD'], #_USUCOD",
+                "(el, v) => { el.value = v; el.dispatchEvent(new Event('input', {bubbles:true})); el.dispatchEvent(new Event('change', {bubbles:true})); }",
+                cpf,
+            )
+            page.wait_for_timeout(150)
+        except Exception:  # noqa: BLE001
+            pass
+
     submit = _first_visible(
         scope,
         [
+            "input[name='BTNLOGIN']",
             "button[type='submit']",
             "input[type='submit']",
             "button:has-text('Entrar')",
@@ -1054,6 +1097,7 @@ def _login_sge(page, cpf: str, senha: str, logger: Optional[LogFn]) -> None:
         submit = _first_visible(
             page,
             [
+                "input[name='BTNLOGIN']",
                 "button[type='submit']",
                 "input[type='submit']",
                 "button:has-text('Entrar')",
@@ -1064,6 +1108,7 @@ def _login_sge(page, cpf: str, senha: str, logger: Optional[LogFn]) -> None:
     if submit is None:
         raise LancamentoError("Nao foi possivel localizar botao de login no SGE.")
 
+    _dismiss_cookie_banner(page, logger=logger)
     submit.click(timeout=ACTION_TIMEOUT_MS)
 
     try:
@@ -1071,6 +1116,21 @@ def _login_sge(page, cpf: str, senha: str, logger: Optional[LogFn]) -> None:
     except PlaywrightTimeoutError:
         # Alguns portais continuam com requests de longa duracao.
         pass
+
+    page.wait_for_timeout(500)
+
+    if _is_login_page(page):
+        err = ""
+        try:
+            err_loc = page.locator(".ErrorViewer")
+            if err_loc.count() > 0:
+                err = (err_loc.first.inner_text(timeout=1200) or "").strip()
+        except Exception:  # noqa: BLE001
+            err = ""
+
+        _capture_stage_debug(page, stage="login_failed", logger=logger)
+        detalhe = err if err else "permaneceu na tela de login apos submeter credenciais"
+        raise LancamentoError(f"Falha no login do SGE: {detalhe}")
 
     _log(logger, "Login realizado. Iniciando lancamento...")
 
