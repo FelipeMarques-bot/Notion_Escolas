@@ -33,6 +33,8 @@ SGE_LOGIN_URL = os.environ.get("SGE_LOGIN_URL", DEFAULT_SGE_LOGIN_URL)
 HEADLESS = os.environ.get("HEADLESS", "1") == "1"
 NAV_TIMEOUT_MS = int(os.environ.get("NAV_TIMEOUT_MS", "35000"))
 ACTION_TIMEOUT_MS = int(os.environ.get("ACTION_TIMEOUT_MS", "9000"))
+MANUAL_LOGIN = os.environ.get("MANUAL_LOGIN", "0") == "1"
+MANUAL_LOGIN_TIMEOUT_SEC = int(os.environ.get("MANUAL_LOGIN_TIMEOUT_SEC", "300"))
 DEBUG_LOGIN = os.environ.get("SGE_DEBUG_LOGIN", "1" if os.environ.get("GITHUB_ACTIONS") == "true" else "0") == "1"
 DEBUG_OUTPUT_DIR = os.environ.get("SGE_DEBUG_DIR", "artifacts/sge-login")
 NOTION_STATUS_PROP = os.environ.get("NOTION_STATUS_PROP", "Status lancamento")
@@ -1037,6 +1039,16 @@ def _is_login_page(page) -> bool:
         return False
 
 
+def _wait_for_manual_login(page, logger: Optional[LogFn]) -> bool:
+    deadline = time.time() + max(30, MANUAL_LOGIN_TIMEOUT_SEC)
+    while time.time() < deadline:
+        if not _is_login_page(page):
+            return True
+        page.wait_for_timeout(700)
+    _log(logger, "Timeout aguardando login manual no SGE.")
+    return False
+
+
 def _read_login_error_message(page) -> str:
     try:
         err_loc = page.locator(".ErrorViewer")
@@ -1054,6 +1066,19 @@ def _login_sge(page, cpf: str, senha: str, logger: Optional[LogFn]) -> None:
     page.goto(login_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
     _ensure_login_form_available(page, logger=logger)
     _dismiss_cookie_banner(page, logger=logger)
+
+    if MANUAL_LOGIN and os.environ.get("GITHUB_ACTIONS") != "true":
+        if HEADLESS:
+            raise LancamentoError("MANUAL_LOGIN=1 exige HEADLESS=0 para abrir o navegador.")
+        _log(
+            logger,
+            "MANUAL_LOGIN ativo: faça login manualmente no navegador aberto. O script continuara apos detectar autenticacao.",
+        )
+        if not _wait_for_manual_login(page, logger=logger):
+            _capture_stage_debug(page, stage="manual_login_timeout", logger=logger)
+            raise LancamentoError("Login manual nao concluido dentro do tempo limite.")
+        _log(logger, "Login manual detectado. Iniciando lancamento...")
+        return
 
     scope = None
     cpf_input = None

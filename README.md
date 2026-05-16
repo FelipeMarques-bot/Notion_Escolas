@@ -44,6 +44,16 @@ python lancar_notas_sge.py --dry-run
 streamlit run painel.py
 ```
 
+### Login manual local (alternativa)
+
+Quando o login no ambiente remoto falhar, rode localmente com navegador visivel:
+
+```bash
+HEADLESS=0 MANUAL_LOGIN=1 python lancar_notas_sge.py --escola "Tancredo" --turno "Matutino" --turma "6º Ano" --trimestre "2º Trimestre"
+```
+
+O script aguarda voce autenticar manualmente no SGE e continua automaticamente apos detectar que saiu da tela de login.
+
 ## Execucao remota no GitHub
 
 Ha duas formas:
