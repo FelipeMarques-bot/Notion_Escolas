@@ -1088,6 +1088,27 @@ def _click_text_any_scope(page, text: str) -> bool:
     return False
 
 
+def _click_any_selector_any_scope(page, selectors: List[str]) -> bool:
+    for scope in _iter_scopes(page):
+        for selector in selectors:
+            try:
+                loc = scope.locator(selector)
+                total = min(loc.count(), 8)
+            except Exception:  # noqa: BLE001
+                continue
+
+            for idx in range(total):
+                node = loc.nth(idx)
+                try:
+                    if not node.is_visible():
+                        continue
+                    node.click(timeout=ACTION_TIMEOUT_MS)
+                    return True
+                except Exception:  # noqa: BLE001
+                    continue
+    return False
+
+
 def _dismiss_cookie_banner(page, logger: Optional[LogFn]) -> None:
     # Banner de consentimento pode sobrepor a tela de login no CI.
     labels = ["Concordo", "Aceitar", "OK", "Entendi"]
