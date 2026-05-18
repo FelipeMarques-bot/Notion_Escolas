@@ -1579,41 +1579,110 @@ def _find_student_row_with_pagination(page, aluno: str, max_pages: int = 5):
     return None
 
 
-def _fill_grade_for_student_by_indexed_inputs(page, aluno: str, nota_texto: str) -> bool:
+def _collect_student_slots(scope) -> List[Dict[str, str]]:
+    try:
+        slots = scope.eval_on_selector_all(
+            "input[name^='_ALUMATNOM_'], span[id^='span__ALUMATNOM_']",
+            """
+            (els) => {
+              const out = [];
+              for (const el of els) {
+                const attr = (el.getAttribute('name') || el.getAttribute('id') || '').trim();
+                const m = attr.match(/_ALUMATNOM_(\d{4})$/);
+                if (!m) continue;
+                const suffix = m[1];
+                const raw = (el.value ?? el.textContent ?? '').trim();
+                if (!raw) continue;
+                out.push({ suffix, aluno: raw });
+              }
+              return out;
+            }
+            """,
+        )
+        if isinstance(slots, list):
+            return [s for s in slots if isinstance(s, dict)]
+    except Exception:  # noqa: BLE001
+        return []
+    return []
+
+
+def _try_fill_grade_by_suffix(scope, suffix: str, nota_texto: str) -> bool:
+    selector = f"input[name='_NOTA_{suffix}'], input[id='_NOTA_{suffix}']"
+    try:
+        field = scope.locator(selector)
+        if field.count() == 0:
+            return False
+        target = field.first
+        try:
+            target.click(timeout=ACTION_TIMEOUT_MS)
+            target.fill(nota_texto, timeout=ACTION_TIMEOUT_MS)
+            target.dispatch_event("input")
+            target.dispatch_event("change")
+            return True
+        except Exception:  # noqa: BLE001
+            pass
+
+        return bool(
+            scope.evaluate(
+                """
+                ({ suffix, nota }) => {
+                  const el = document.querySelector(`input[name='_NOTA_${suffix}'], input[id='_NOTA_${suffix}']`);
+                  if (!el) return false;
+                  el.value = nota;
+                  el.dispatchEvent(new Event('input', { bubbles: true }));
+                  el.dispatchEvent(new Event('change', { bubbles: true }));
+                  return true;
+                }
+                """,
+                {"suffix": suffix, "nota": nota_texto},
+            )
+        )
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _try_fill_grade_for_student_on_current_page(page, aluno: str, nota_texto: str) -> bool:
     alvo = _normalize_loose(aluno)
     if not alvo:
         return False
 
     for scope in _iter_scopes(page):
-        try:
-            names = scope.locator("input[name^='_ALUMATNOM_']")
-            total = names.count()
-        except Exception:  # noqa: BLE001
+        slots = _collect_student_slots(scope)
+        if not slots:
             continue
 
-        for idx in range(total):
-            node = names.nth(idx)
-            try:
-                aluno_tela = (node.input_value(timeout=400) or "").strip()
-            except Exception:  # noqa: BLE001
-                continue
+        # 1) Match exato normalizado.
+        for slot in slots:
+            aluno_tela = _normalize_loose(str(slot.get("aluno", "")))
+            if aluno_tela and aluno_tela == alvo:
+                if _try_fill_grade_by_suffix(scope, str(slot.get("suffix", "")), nota_texto):
+                    return True
 
-            if _normalize_loose(aluno_tela) != alvo:
+        # 2) Match por inclusao para pequenas variacoes de cadastro.
+        for slot in slots:
+            aluno_tela = _normalize_loose(str(slot.get("aluno", "")))
+            if not aluno_tela:
                 continue
+            if alvo in aluno_tela or aluno_tela in alvo:
+                if _try_fill_grade_by_suffix(scope, str(slot.get("suffix", "")), nota_texto):
+                    return True
 
-            try:
-                suffix = (node.get_attribute("name") or "").rsplit("_", 1)[-1]
-                nota_field = scope.locator(f"input[name='_NOTA_{suffix}']")
-                if nota_field.count() == 0:
-                    continue
+    return False
 
-                field = nota_field.first
-                field.click(timeout=ACTION_TIMEOUT_MS)
-                field.fill(nota_texto, timeout=ACTION_TIMEOUT_MS)
-                field.dispatch_event("change")
-                return True
-            except Exception:  # noqa: BLE001
-                continue
+
+def _fill_grade_for_student_by_indexed_inputs(page, aluno: str, nota_texto: str, max_pages: int = 5) -> bool:
+    if _try_fill_grade_for_student_on_current_page(page, aluno, nota_texto):
+        return True
+
+    _go_to_first_grade_page(page)
+    if _try_fill_grade_for_student_on_current_page(page, aluno, nota_texto):
+        return True
+
+    for _ in range(max_pages - 1):
+        if not _go_to_next_grade_page(page):
+            break
+        if _try_fill_grade_for_student_on_current_page(page, aluno, nota_texto):
+            return True
 
     return False
 
