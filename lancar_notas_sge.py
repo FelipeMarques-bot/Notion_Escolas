@@ -1372,9 +1372,59 @@ def _find_student_row(page, aluno: str):
     return None
 
 
+def _go_to_first_grade_page(page) -> bool:
+    moved = _click_any_selector_any_scope(
+        page,
+        [
+            "input[type='submit'][value='|<']",
+            "input[type='button'][value='|<']",
+            "button:has-text('|<')",
+            "a:has-text('|<')",
+        ],
+    )
+    if moved:
+        page.wait_for_timeout(450)
+    return moved
+
+
+def _go_to_next_grade_page(page) -> bool:
+    moved = _click_any_selector_any_scope(
+        page,
+        [
+            "input[type='submit'][value='>>']",
+            "input[type='button'][value='>>']",
+            "button:has-text('>>')",
+            "a:has-text('>>')",
+        ],
+    )
+    if moved:
+        page.wait_for_timeout(450)
+    return moved
+
+
+def _find_student_row_with_pagination(page, aluno: str, max_pages: int = 5):
+    row = _find_student_row(page, aluno)
+    if row is not None:
+        return row
+
+    _go_to_first_grade_page(page)
+    row = _find_student_row(page, aluno)
+    if row is not None:
+        return row
+
+    for _ in range(max_pages - 1):
+        if not _go_to_next_grade_page(page):
+            break
+        row = _find_student_row(page, aluno)
+        if row is not None:
+            return row
+
+    return None
+
+
 def _fill_grade_for_student(page, aluno: str, nota: float, logger: Optional[LogFn]) -> bool:
     nota_texto = str(nota).replace(".", ",")
-    row = _find_student_row(page, aluno)
+    row = _find_student_row_with_pagination(page, aluno)
     if row is None:
         _capture_stage_debug(page, stage="student_not_found", logger=logger)
         _log(logger, f"Aviso: aluno nao localizado na grade: {aluno}")
