@@ -1,5 +1,6 @@
 import argparse
 import difflib
+import html
 import os
 import re
 import time
@@ -277,6 +278,15 @@ def _student_name_matches(expected: str, current: str) -> bool:
     if a == b or a in b or b in a:
         return True
 
+    # Compara nomes compactados para tolerar ruido de espacos/codificacao.
+    a_compact = re.sub(r"[^a-z0-9]", "", a)
+    b_compact = re.sub(r"[^a-z0-9]", "", b)
+    if a_compact and b_compact:
+        if a_compact == b_compact:
+            return True
+        if abs(len(a_compact) - len(b_compact)) <= 2 and difflib.SequenceMatcher(None, a_compact, b_compact).ratio() >= 0.93:
+            return True
+
     ta = [t for t in a.split() if t]
     tb = [t for t in b.split() if t]
     if not ta or not tb:
@@ -303,6 +313,8 @@ def _pick_best_student_slot(expected: str, slots: List[Dict[str, str]]) -> Optio
     if not alvo_tokens:
         return None
     alvo_first = alvo_tokens[0]
+    alvo_first_prefix = alvo_first[:3]
+    alvo_last = alvo_tokens[-1]
 
     best: Optional[Dict[str, str]] = None
     best_score = 0.0
@@ -316,8 +328,12 @@ def _pick_best_student_slot(expected: str, slots: List[Dict[str, str]]) -> Optio
         if not atual_tokens:
             continue
 
-        # Evita casar alunos diferentes: primeiro token deve coincidir.
-        if atual_tokens[0] != alvo_first:
+        # Guardrails para evitar aluno errado em fallback aproximado.
+        atual_first = atual_tokens[0]
+        atual_last = atual_tokens[-1]
+        if atual_last != alvo_last:
+            continue
+        if atual_first != alvo_first and not atual_first.startswith(alvo_first_prefix):
             continue
 
         overlap = len(set(alvo_tokens).intersection(atual_tokens))
@@ -333,6 +349,25 @@ def _pick_best_student_slot(expected: str, slots: List[Dict[str, str]]) -> Optio
 
     # Threshold conservador para impedir falso positivo.
     return best if best_score >= 0.90 else None
+
+
+def _find_student_suffix_by_html(scope, aluno: str) -> Optional[str]:
+    alvo = _normalize_loose(aluno)
+    if not alvo:
+        return None
+
+    try:
+        html_text = scope.content()
+    except Exception:  # noqa: BLE001
+        return None
+
+    for match in re.finditer(r'name="_ALUMATNOM_(\d{4})"\s+value="([^"]*)"', html_text, flags=re.IGNORECASE):
+        suffix = match.group(1)
+        nome_tela = html.unescape(match.group(2) or "").strip()
+        if _student_name_matches(aluno, nome_tela):
+            return suffix
+
+    return None
 
 
 def _safe_notion_call(fn):
@@ -1742,6 +1777,10 @@ def _try_fill_grade_for_student_on_current_page(page, aluno: str, nota_texto: st
 
         slot = _pick_best_student_slot(aluno, slots)
         if slot and _try_fill_grade_by_suffix(scope, str(slot.get("suffix", "")), nota_texto):
+            return True
+
+        suffix = _find_student_suffix_by_html(scope, aluno)
+        if suffix and _try_fill_grade_by_suffix(scope, suffix, nota_texto):
             return True
 
     return False
