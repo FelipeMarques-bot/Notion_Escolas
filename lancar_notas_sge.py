@@ -245,6 +245,44 @@ def _status_prop_for_activity(atividade: str) -> str:
     return "Status lancamento"
 
 
+def _resolve_existing_status_prop(props: Dict[str, Dict], preferred: str) -> str:
+    alvo = (preferred or "").strip()
+    if not alvo:
+        return preferred
+
+    candidates = [alvo]
+    if not re.search(r"\d+\s*$", alvo):
+        candidates.extend([f"{alvo} 1", f"{alvo} 2", f"{alvo} 3"])
+
+    for candidate in candidates:
+        if candidate in props:
+            return candidate
+
+    for name in props.keys():
+        if _normalize(name).startswith("status lancamento"):
+            return name
+
+    return preferred
+
+
+def _student_name_matches(expected: str, current: str) -> bool:
+    a = _normalize_loose(expected)
+    b = _normalize_loose(current)
+    if not a or not b:
+        return False
+    if a == b or a in b or b in a:
+        return True
+
+    ta = [t for t in a.split() if t]
+    tb = [t for t in b.split() if t]
+    if not ta or not tb:
+        return False
+
+    common = set(ta).intersection(tb)
+    same_ends = ta[0] == tb[0] and ta[-1] == tb[-1]
+    return same_ends and len(common) >= max(2, min(len(ta), len(tb)) - 1)
+
+
 def _safe_notion_call(fn):
     retry = 4
     wait = 1.2
@@ -1642,8 +1680,7 @@ def _try_fill_grade_by_suffix(scope, suffix: str, nota_texto: str) -> bool:
 
 
 def _try_fill_grade_for_student_on_current_page(page, aluno: str, nota_texto: str) -> bool:
-    alvo = _normalize_loose(aluno)
-    if not alvo:
+    if not _normalize_loose(aluno):
         return False
 
     for scope in _iter_scopes(page):
@@ -1651,19 +1688,10 @@ def _try_fill_grade_for_student_on_current_page(page, aluno: str, nota_texto: st
         if not slots:
             continue
 
-        # 1) Match exato normalizado.
+        # 1) Match exato/forte de nome.
         for slot in slots:
-            aluno_tela = _normalize_loose(str(slot.get("aluno", "")))
-            if aluno_tela and aluno_tela == alvo:
-                if _try_fill_grade_by_suffix(scope, str(slot.get("suffix", "")), nota_texto):
-                    return True
-
-        # 2) Match por inclusao para pequenas variacoes de cadastro.
-        for slot in slots:
-            aluno_tela = _normalize_loose(str(slot.get("aluno", "")))
-            if not aluno_tela:
-                continue
-            if alvo in aluno_tela or aluno_tela in alvo:
+            aluno_tela = str(slot.get("aluno", ""))
+            if _student_name_matches(aluno, aluno_tela):
                 if _try_fill_grade_by_suffix(scope, str(slot.get("suffix", "")), nota_texto):
                     return True
 
@@ -1740,15 +1768,16 @@ def _update_launch_status_for_notes(registros: List[RegistroNota], logger: Optio
         try:
             page = _safe_notion_call(lambda page_id=page_id: notion.pages.retrieve(page_id=page_id))
             props = page.get("properties", {})
-            prop_info = props.get(status_prop, {})
+            status_prop_real = _resolve_existing_status_prop(props, status_prop)
+            prop_info = props.get(status_prop_real, {})
             ptype = prop_info.get("type")
 
             if ptype == "select":
-                payload = {status_prop: {"select": {"name": "Lancada"}}}
+                payload = {status_prop_real: {"select": {"name": "Lancada"}}}
             elif ptype == "checkbox":
-                payload = {status_prop: {"checkbox": True}}
+                payload = {status_prop_real: {"checkbox": True}}
             elif ptype == "rich_text":
-                payload = {status_prop: {"rich_text": _make_rich_text("Lancada")}}
+                payload = {status_prop_real: {"rich_text": _make_rich_text("Lancada")}}
             else:
                 _log(logger, f"Aviso: propriedade de status nao encontrada/compativel para {reg.aluno}: {status_prop}")
                 falhas += 1
