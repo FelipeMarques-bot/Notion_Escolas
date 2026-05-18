@@ -1312,10 +1312,120 @@ def _select_context(page, contexto: ContextoTurma, logger: Optional[LogFn]) -> N
         _click_text_any_scope(page, item)
 
 
+def _extract_first_number(text: str) -> str:
+    match = re.search(r"(\d+)", text or "")
+    return match.group(1) if match else ""
+
+
+def _turno_code(turno: str) -> str:
+    norm = _normalize(turno)
+    if "matutino" in norm:
+        return "1"
+    if "vespertino" in norm:
+        return "2"
+    if "integral" in norm:
+        return "4"
+    return "0"
+
+
+def _set_filters_on_portal(page, contexto: ContextoTurma, logger: Optional[LogFn]) -> None:
+    etapa = _extract_first_number(contexto.turma)
+    turma = _extract_first_number(contexto.turma)
+    turno = _turno_code(contexto.turno)
+
+    for scope in _iter_scopes(page):
+        try:
+            etapa_sel = scope.locator("select[name='W0019_SECNUMFILTRODISC']")
+            if etapa_sel.count() > 0 and etapa:
+                etapa_sel.first.select_option(value=etapa)
+
+            turno_sel = scope.locator("select[name='W0019_TRNCODFILTRODISC']")
+            if turno_sel.count() > 0 and turno != "0":
+                turno_sel.first.select_option(value=turno)
+
+            turma_in = scope.locator("input[name='W0019_TURNUMFILTRODISC']")
+            if turma_in.count() > 0 and turma:
+                turma_in.first.fill(turma)
+
+            if _click_any_selector_any_scope(
+                page,
+                [
+                    "#W0019REFRESH1",
+                    "a[onclick*='FILTRODISCIPLINA' i]",
+                    "input[type='submit'][value*='Filtr' i]",
+                    "button:has-text('Filtr')",
+                ],
+            ):
+                page.wait_for_timeout(700)
+
+            _log(logger, "Filtros de contexto aplicados na tela do professor.")
+            return
+        except Exception:  # noqa: BLE001
+            continue
+
+
+def _open_assessment_for_context(page, contexto: ContextoTurma, logger: Optional[LogFn]) -> bool:
+    _set_filters_on_portal(page, contexto, logger=logger)
+
+    turma_num = _extract_first_number(contexto.turma)
+    trimestre_num = _extract_first_number(contexto.trimestre)
+    turno_norm = _normalize(contexto.turno).upper()
+
+    for scope in _iter_scopes(page):
+        hidden_rows = scope.locator("input[name^='W0019W0075_TURNUMSTR_']")
+        total = hidden_rows.count()
+        for idx in range(total):
+            cell = hidden_rows.nth(idx)
+            try:
+                label = (cell.input_value(timeout=400) or "").strip()
+            except Exception:  # noqa: BLE001
+                continue
+
+            norm = _normalize(label)
+            ok_turno = bool(turno_norm and _normalize(turno_norm) in norm)
+            ok_turma = bool(turma_num and re.search(rf"\b{re.escape(turma_num)}\b", norm))
+            ok_trim = bool(trimestre_num and f"{trimestre_num}o trimestre" in norm)
+            if not (ok_turno and ok_turma and ok_trim):
+                continue
+
+            try:
+                name = cell.get_attribute("name") or ""
+                suffix = name.rsplit("_", 1)[-1]
+                icon = scope.locator(f"#W0019W0075_AVALIACAO_{suffix}, img[name='W0019W0075_AVALIACAO_{suffix}']")
+                if icon.count() == 0:
+                    continue
+
+                icon.first.click(timeout=ACTION_TIMEOUT_MS)
+                page.wait_for_timeout(900)
+                _log(logger, f"Avaliacao aberta pela linha de turma: {label}")
+                return True
+            except Exception:  # noqa: BLE001
+                continue
+
+    _log(logger, "Aviso: nao foi possivel abrir icone de avaliacao pela linha da turma.")
+    return False
+
+
+def _is_student_grid_visible(page) -> bool:
+    for scope in _iter_scopes(page):
+        try:
+            if scope.get_by_text("Nome Estudante", exact=False).count() > 0:
+                return True
+        except Exception:  # noqa: BLE001
+            continue
+    return False
+
+
 def _select_activity(page, atividade: str, logger: Optional[LogFn]) -> None:
     _log(logger, f"Selecionando avaliacao: {atividade}")
     if _click_text_any_scope(page, atividade):
         page.wait_for_timeout(500)
+        return
+
+    # Quando a grade de estudantes ja estiver visivel, nao bloqueia o fluxo
+    # por causa de variacao de rótulo da atividade (ex.: 8-Avaliacao).
+    if _normalize(atividade) == "avaliacao" and _is_student_grid_visible(page):
+        _log(logger, "Grade de estudantes detectada; seguindo sem clique explicito da atividade.")
         return
 
     alvo_norm = _normalize(atividade)
@@ -1614,6 +1724,10 @@ def executar_lancamento(
 
             contexto = ContextoTurma(escola=escola, turno=turno, turma=turma, trimestre=trimestre)
             _select_context(page, contexto, logger=logger)
+
+            # Fluxo hibrido assistido: abre o icone de avaliacao da linha da
+            # turma/turno/trimestre antes de tentar localizar a atividade.
+            _open_assessment_for_context(page, contexto, logger=logger)
             _select_activity(page, atividade, logger=logger)
 
             regs_ok_bloco: List[RegistroNota] = []
@@ -1632,6 +1746,12 @@ def executar_lancamento(
         browser.close()
 
     _log(logger, f"Finalizado. Notas preenchidas: {notas_ok} | Falhas: {falhas}")
+
+    if total_notas > 0 and notas_ok == 0:
+        raise LancamentoError(
+            "Nenhuma nota foi preenchida no SGE. Fluxo interrompido para evitar falso sucesso."
+        )
+
     return {
         "blocos": total_blocos,
         "notas": total_notas,
