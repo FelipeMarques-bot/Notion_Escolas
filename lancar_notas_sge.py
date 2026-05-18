@@ -46,6 +46,7 @@ NOTION_LAST_RUN_PROP = os.environ.get("NOTION_LAST_RUN_PROP", "Ultima execucao")
 NOTION_LAUNCH_DATE_PROP = os.environ.get("NOTION_LAUNCH_DATE_PROP", "Data lancamento")
 NOTION_LOG_PROP = os.environ.get("NOTION_LOG_PROP", "Log execucao")
 NOTION_REQUEST_PROP = os.environ.get("NOTION_REQUEST_PROP", "Solicitar lancamento")
+AUTOMATION_VERSION = "2026-05-18-sge-flow-v3"
 
 _DEBUG_CAPTURED_STAGES: set[str] = set()
 
@@ -993,6 +994,35 @@ def _capture_stage_debug(page, stage: str, logger: Optional[LogFn]) -> None:
                         lines.append(f"  - {txt}")
             except Exception:  # noqa: BLE001
                 continue
+            try:
+                submits = frame.locator("input[type='submit'], input[type='button'], button")
+                total_submits = min(submits.count(), 25)
+                lines.append(f"frame[{idx}] sample_buttons={total_submits}")
+                for i in range(total_submits):
+                    btn = submits.nth(i)
+                    txt = (btn.inner_text(timeout=200) or "").strip()
+                    val = (btn.get_attribute("value") or "").strip()
+                    if txt or val:
+                        lines.append(f"  - button: {txt or val}")
+            except Exception:  # noqa: BLE001
+                continue
+            try:
+                selects = frame.locator("select")
+                total_selects = min(selects.count(), 10)
+                lines.append(f"frame[{idx}] sample_selects={total_selects}")
+                for i in range(total_selects):
+                    sel = selects.nth(i)
+                    opts = sel.locator("option")
+                    total_opts = min(opts.count(), 20)
+                    labels = []
+                    for j in range(total_opts):
+                        opt_text = (opts.nth(j).inner_text(timeout=200) or "").strip()
+                        if opt_text:
+                            labels.append(opt_text)
+                    if labels:
+                        lines.append(f"  - select[{i}]: {', '.join(labels)}")
+            except Exception:  # noqa: BLE001
+                continue
 
         with open(info_path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
@@ -1080,12 +1110,82 @@ def _click_text_any_scope(page, text: str) -> bool:
         ]
         for loc in candidates:
             try:
-                if loc.count() > 0:
-                    loc.first.click(timeout=2000)
-                    return True
+                total = min(loc.count(), 8)
+                for idx in range(total):
+                    node = loc.nth(idx)
+                    try:
+                        if not node.is_visible():
+                            continue
+                        node.click(timeout=2000)
+                        return True
+                    except Exception:  # noqa: BLE001
+                        continue
             except Exception:  # noqa: BLE001
                 continue
     return False
+
+
+def _click_any_selector_any_scope(page, selectors: List[str]) -> bool:
+    for scope in _iter_scopes(page):
+        for selector in selectors:
+            try:
+                loc = scope.locator(selector)
+                total = min(loc.count(), 8)
+            except Exception:  # noqa: BLE001
+                continue
+
+            for idx in range(total):
+                node = loc.nth(idx)
+                try:
+                    if not node.is_visible():
+                        continue
+                    node.click(timeout=ACTION_TIMEOUT_MS)
+                    return True
+                except Exception:  # noqa: BLE001
+                    continue
+    return False
+
+
+def _open_grade_screen(page, logger: Optional[LogFn]) -> bool:
+    # Sequencia de tentativas para levar a pagina para a grade de notas.
+    clicked = False
+
+    labels = [
+        "Lancar Notas",
+        "Lancar nota",
+        "Notas",
+        "Avaliacoes",
+        "Avaliacoes",
+        "Avaliacao",
+        "Boletim",
+        "Diario",
+        "Professor",
+        "Continuar",
+    ]
+    for label in labels:
+        if _click_text_any_scope(page, label):
+            clicked = True
+            page.wait_for_timeout(500)
+
+    if _click_any_selector_any_scope(
+        page,
+        [
+            "input[type='submit'][value*='Lanc' i]",
+            "input[type='button'][value*='Lanc' i]",
+            "input[type='submit'][value*='Nota' i]",
+            "input[type='button'][value*='Nota' i]",
+            "button:has-text('Lanc')",
+            "button:has-text('Nota')",
+            "a:has-text('Lanc')",
+            "a:has-text('Nota')",
+        ],
+    ):
+        clicked = True
+        page.wait_for_timeout(700)
+
+    if clicked:
+        _log(logger, "Tentativa de abertura da grade de notas executada.")
+    return clicked
 
 
 def _dismiss_cookie_banner(page, logger: Optional[LogFn]) -> None:
@@ -1284,6 +1384,9 @@ def _login_sge(page, cpf: str, senha: str, logger: Optional[LogFn]) -> None:
 def _select_context(page, contexto: ContextoTurma, logger: Optional[LogFn]) -> None:
     _log(logger, f"Selecionando contexto: {contexto.escola} | {contexto.turno} | {contexto.turma} | {contexto.trimestre}")
 
+    _open_school_home_row(page, contexto.escola, logger=logger)
+    _apply_class_filters(page, contexto, logger=logger)
+
     textos = [contexto.escola, contexto.turno, contexto.turma, contexto.trimestre]
     for item in textos:
         if item.startswith("Escola nao") or item.startswith("Turno nao"):
@@ -1291,14 +1394,304 @@ def _select_context(page, contexto: ContextoTurma, logger: Optional[LogFn]) -> N
         _click_text_any_scope(page, item)
 
 
-def _select_activity(page, atividade: str, logger: Optional[LogFn]) -> None:
+def _context_tokens(contexto: ContextoTurma) -> Tuple[str, str, str]:
+    turma_token = _normalize(contexto.turma).replace("º", "o")
+    turno_token = _normalize(contexto.turno)
+    trimestre_token = _normalize(contexto.trimestre)
+    return turma_token, turno_token, trimestre_token
+
+
+def _select_option_contains(page, texto_alvo: str) -> bool:
+    alvo = _normalize(texto_alvo)
+    if not alvo:
+        return False
+
+    for scope in _iter_scopes(page):
+        try:
+            selects = scope.locator("select")
+            total_selects = selects.count()
+        except Exception:  # noqa: BLE001
+            continue
+
+        for i in range(total_selects):
+            sel = selects.nth(i)
+            try:
+                options = sel.locator("option")
+                total_options = options.count()
+            except Exception:  # noqa: BLE001
+                continue
+
+            for j in range(total_options):
+                opt = options.nth(j)
+                try:
+                    txt = (opt.inner_text(timeout=200) or "").strip()
+                except Exception:  # noqa: BLE001
+                    continue
+                txt_norm = _normalize(txt)
+                if not txt_norm:
+                    continue
+                if alvo in txt_norm or txt_norm in alvo:
+                    try:
+                        val = opt.get_attribute("value")
+                        if val is not None:
+                            sel.select_option(value=val, timeout=ACTION_TIMEOUT_MS)
+                        else:
+                            sel.select_option(label=txt, timeout=ACTION_TIMEOUT_MS)
+                        page.wait_for_timeout(300)
+                        return True
+                    except Exception:  # noqa: BLE001
+                        continue
+    return False
+
+
+def _open_school_home_row(page, escola: str, logger: Optional[LogFn]) -> bool:
+    escola_norm = _normalize(escola)
+    if not escola_norm:
+        return False
+
+    # Tentativa por texto da escola em links da pagina inicial.
+    for scope in _iter_scopes(page):
+        try:
+            links = scope.locator("a")
+            total = links.count()
+        except Exception:  # noqa: BLE001
+            continue
+
+        for idx in range(total):
+            link = links.nth(idx)
+            try:
+                txt = (link.inner_text(timeout=300) or "").strip()
+            except Exception:  # noqa: BLE001
+                continue
+            txt_norm = _normalize(txt)
+            if not txt_norm:
+                continue
+            if escola_norm in txt_norm:
+                try:
+                    link.click(timeout=ACTION_TIMEOUT_MS)
+                    page.wait_for_timeout(900)
+                    _log(logger, f"Escola selecionada na lista inicial: {escola}")
+                    return True
+                except Exception:  # noqa: BLE001
+                    continue
+    return False
+
+
+def _apply_class_filters(page, contexto: ContextoTurma, logger: Optional[LogFn]) -> None:
+    # Nos filtros da tela de turmas, tentamos selecionar turno/turma e aplicar.
+    _select_option_contains(page, contexto.turno)
+    _select_option_contains(page, contexto.turma)
+
+    clicou = _click_any_selector_any_scope(
+        page,
+        [
+            "input[type='image']",
+            "button:has-text('Filtrar')",
+            "input[type='submit'][value*='Filtrar' i]",
+            "input[type='button'][value*='Filtrar' i]",
+        ],
+    )
+    if clicou:
+        page.wait_for_timeout(700)
+        _log(logger, "Filtro de turmas aplicado na tela do SGE.")
+
+
+def _open_assessment_icon_for_context(page, contexto: ContextoTurma, logger: Optional[LogFn]) -> bool:
+    turma_token, turno_token, trimestre_token = _context_tokens(contexto)
+
+    for scope in _iter_scopes(page):
+        try:
+            rows = scope.locator("tr")
+            total_rows = rows.count()
+        except Exception:  # noqa: BLE001
+            continue
+
+        for idx in range(total_rows):
+            row = rows.nth(idx)
+            try:
+                texto_row = _normalize(row.inner_text(timeout=500) or "")
+            except Exception:  # noqa: BLE001
+                continue
+
+            if not texto_row:
+                continue
+            if turma_token not in texto_row or turno_token not in texto_row or trimestre_token not in texto_row:
+                continue
+
+            # Fluxo principal: abrir o icone/botao azul de Avaliacao na linha da turma.
+            candidatos = [
+                "a[href*='avali' i]",
+                "a[title*='Avalia' i]",
+                "a:has(img[alt*='Avalia' i])",
+                "a:has(img[src*='avali' i])",
+            ]
+            for sel in candidatos:
+                try:
+                    links = row.locator(sel)
+                    if links.count() > 0 and links.first.is_visible():
+                        links.first.click(timeout=ACTION_TIMEOUT_MS)
+                        page.wait_for_timeout(900)
+                        _log(logger, "Acesso de Avaliacao aberto pelo icone da linha da turma.")
+                        return True
+                except Exception:  # noqa: BLE001
+                    continue
+
+            # Fallback solicitado: 5o botao (icone azul) da linha.
+            try:
+                links = row.locator("a")
+                if links.count() >= 5:
+                    links.nth(4).click(timeout=ACTION_TIMEOUT_MS)
+                    page.wait_for_timeout(900)
+                    _log(logger, "Acesso de Avaliacao aberto pelo 5o botao da linha da turma.")
+                    return True
+            except Exception:  # noqa: BLE001
+                continue
+
+    return False
+
+
+def _open_activity_by_type_column(page, atividade: str, logger: Optional[LogFn]) -> bool:
+    alvo_norm = _normalize(atividade)
+    alvo_loose = _normalize_loose(atividade)
+
+    # Etapa recomendada: clicar no cabecalho 'Tipo'.
+    _click_text_any_scope(page, "Tipo")
+    page.wait_for_timeout(300)
+
+    def _try_click_activity_in_current_page() -> bool:
+        for scope in _iter_scopes(page):
+            try:
+                links = scope.locator("a")
+                total = links.count()
+            except Exception:  # noqa: BLE001
+                continue
+
+            for idx in range(total):
+                link = links.nth(idx)
+                try:
+                    txt = (link.inner_text(timeout=400) or "").strip()
+                except Exception:  # noqa: BLE001
+                    continue
+
+                if not txt:
+                    continue
+                txt_norm = _normalize(txt)
+                txt_loose = _normalize_loose(txt)
+
+                if alvo_norm and (alvo_norm == txt_norm or alvo_norm in txt_norm or txt_norm in alvo_norm):
+                    link.click(timeout=ACTION_TIMEOUT_MS)
+                    page.wait_for_timeout(900)
+                    return True
+
+                if alvo_loose and (alvo_loose == txt_loose or alvo_loose in txt_loose or txt_loose in alvo_loose):
+                    link.click(timeout=ACTION_TIMEOUT_MS)
+                    page.wait_for_timeout(900)
+                    return True
+
+                # Quando o Notion vier como atividade generica.
+                if alvo_norm == "avaliacao" and "avali" in txt_loose:
+                    link.click(timeout=ACTION_TIMEOUT_MS)
+                    page.wait_for_timeout(900)
+                    return True
+        return False
+
+    if _try_click_activity_in_current_page():
+        _log(logger, "Avaliacao selecionada pela coluna Tipo.")
+        return True
+
+    # Avanca paginas (>> ou >) da listagem de avaliacoes, quando houver.
+    for _ in range(5):
+        avancou = _click_any_selector_any_scope(
+            page,
+            [
+                "a:has-text('>>')",
+                "button:has-text('>>')",
+                "a:has-text('>')",
+                "button:has-text('>')",
+                "input[type='submit'][value='>>']",
+                "input[type='submit'][value='>']",
+            ],
+        )
+        if not avancou:
+            break
+        page.wait_for_timeout(700)
+        if _try_click_activity_in_current_page():
+            _log(logger, "Avaliacao selecionada pela coluna Tipo (com paginacao).")
+            return True
+
+    return False
+
+
+def _select_activity(page, atividade: str, logger: Optional[LogFn]) -> bool:
     _log(logger, f"Selecionando avaliacao: {atividade}")
+
+    # Fluxo principal do portal: coluna 'Tipo' e clique no nome da avaliacao.
+    if _open_activity_by_type_column(page, atividade, logger=logger):
+        return True
+
     if _click_text_any_scope(page, atividade):
         page.wait_for_timeout(500)
-        return
+        return True
 
     alvo_norm = _normalize(atividade)
     alvo_loose = _normalize_loose(atividade)
+
+    # Alguns portais apresentam a avaliacao em <select>.
+    for scope in _iter_scopes(page):
+        try:
+            selects = scope.locator("select")
+            total_selects = selects.count()
+        except Exception:  # noqa: BLE001
+            continue
+
+        for idx in range(total_selects):
+            sel = selects.nth(idx)
+            try:
+                if not sel.is_visible():
+                    continue
+                options = sel.locator("option")
+                total_options = options.count()
+            except Exception:  # noqa: BLE001
+                continue
+
+            for j in range(total_options):
+                opt = options.nth(j)
+                try:
+                    texto = (opt.inner_text(timeout=400) or "").strip()
+                    val = (opt.get_attribute("value") or "").strip()
+                except Exception:  # noqa: BLE001
+                    continue
+
+                cand_norm = _normalize(texto)
+                cand_loose = _normalize_loose(texto)
+                if not cand_norm and val:
+                    cand_norm = _normalize(val)
+                    cand_loose = _normalize_loose(val)
+
+                if not cand_norm:
+                    continue
+
+                is_match = False
+                if alvo_norm and (alvo_norm in cand_norm or cand_norm in alvo_norm):
+                    is_match = True
+                elif alvo_loose and (alvo_loose in cand_loose or cand_loose in alvo_loose):
+                    is_match = True
+                elif alvo_norm == "avaliacao" and ("avaliacao" in cand_norm or "avali" in cand_loose):
+                    is_match = True
+
+                if not is_match:
+                    continue
+
+                try:
+                    option_value = opt.get_attribute("value")
+                    if option_value is not None:
+                        sel.select_option(value=option_value, timeout=ACTION_TIMEOUT_MS)
+                    else:
+                        sel.select_option(label=texto, timeout=ACTION_TIMEOUT_MS)
+                    page.wait_for_timeout(700)
+                    return True
+                except Exception:  # noqa: BLE001
+                    continue
     for scope in _iter_scopes(page):
         links = scope.locator("a")
         total_links = links.count()
@@ -1313,15 +1706,45 @@ def _select_activity(page, atividade: str, logger: Optional[LogFn]) -> None:
                 if alvo_norm and (alvo_norm in texto_norm or texto_norm in alvo_norm):
                     link.click(timeout=ACTION_TIMEOUT_MS)
                     page.wait_for_timeout(700)
-                    return
+                    return True
                 if alvo_loose and (alvo_loose in texto_loose or texto_loose in alvo_loose):
                     link.click(timeout=ACTION_TIMEOUT_MS)
                     page.wait_for_timeout(700)
-                    return
+                    return True
                 if alvo_norm == "avaliacao" and ("avaliacao" in texto_norm or "avali" in texto_loose):
                     link.click(timeout=ACTION_TIMEOUT_MS)
                     page.wait_for_timeout(700)
-                    return
+                    return True
+            except Exception:  # noqa: BLE001
+                continue
+
+    # Alguns layouts usam input submit/button com o nome da avaliacao.
+    for scope in _iter_scopes(page):
+        buttons = scope.locator("input[type='submit'], input[type='button'], button")
+        total_buttons = buttons.count()
+        for idx in range(total_buttons):
+            button = buttons.nth(idx)
+            try:
+                texto = (button.inner_text(timeout=300) or "").strip()
+                valor = (button.get_attribute("value") or "").strip()
+                candidato = texto or valor
+                if not candidato:
+                    continue
+
+                cand_norm = _normalize(candidato)
+                cand_loose = _normalize_loose(candidato)
+                if alvo_norm and (alvo_norm in cand_norm or cand_norm in alvo_norm):
+                    button.click(timeout=ACTION_TIMEOUT_MS)
+                    page.wait_for_timeout(700)
+                    return True
+                if alvo_loose and (alvo_loose in cand_loose or cand_loose in alvo_loose):
+                    button.click(timeout=ACTION_TIMEOUT_MS)
+                    page.wait_for_timeout(700)
+                    return True
+                if alvo_norm == "avaliacao" and ("avaliacao" in cand_norm or "avali" in cand_loose):
+                    button.click(timeout=ACTION_TIMEOUT_MS)
+                    page.wait_for_timeout(700)
+                    return True
             except Exception:  # noqa: BLE001
                 continue
 
@@ -1338,12 +1761,28 @@ def _select_activity(page, atividade: str, logger: Optional[LogFn]) -> None:
             try:
                 submit.click(timeout=ACTION_TIMEOUT_MS)
                 page.wait_for_timeout(700)
-                return
+                return True
             except Exception:  # noqa: BLE001
                 continue
 
+    # Quando a atividade do Notion e generica (ex.: "Avaliacao"), escolher a
+    # primeira opcao com semantica de avaliacao pode ser suficiente para abrir a grade.
+    if alvo_norm == "avaliacao":
+        if _click_any_selector_any_scope(
+            page,
+            [
+                "a:has-text('Avalia')",
+                "button:has-text('Avalia')",
+                "input[type='submit'][value*='Avalia' i]",
+                "input[type='button'][value*='Avalia' i]",
+            ],
+        ):
+            page.wait_for_timeout(700)
+            return True
+
     _capture_stage_debug(page, stage="activity_not_found", logger=logger)
     _log(logger, f"Aviso: avaliacao nao encontrada diretamente na tela: {atividade}")
+    return False
 
 
 def _find_student_row(page, aluno: str):
@@ -1357,8 +1796,16 @@ def _find_student_row(page, aluno: str):
         if direct.count() > 0:
             return direct.first
 
+        # Alguns layouts renderizam linhas como div/li em vez de tr.
+        try:
+            generic = scope.locator("div, li", has_text=aluno)
+            if generic.count() > 0:
+                return generic.first
+        except Exception:  # noqa: BLE001
+            pass
+
         # Fallback tolerante a acentos/case/espacos.
-        rows = scope.locator("tr")
+        rows = scope.locator("tr, div[class*='row' i], li")
         total_rows = rows.count()
         for idx in range(total_rows):
             row = rows.nth(idx)
@@ -1372,15 +1819,134 @@ def _find_student_row(page, aluno: str):
     return None
 
 
+def _go_to_first_grade_page(page) -> bool:
+    moved = _click_any_selector_any_scope(
+        page,
+        [
+            "input[type='submit'][value='|<']",
+            "input[type='button'][value='|<']",
+            "button:has-text('|<')",
+            "a:has-text('|<')",
+        ],
+    )
+    if moved:
+        page.wait_for_timeout(450)
+    return moved
+
+
+def _go_to_next_grade_page(page) -> bool:
+    moved = _click_any_selector_any_scope(
+        page,
+        [
+            "input[type='submit'][value='>>']",
+            "input[type='button'][value='>>']",
+            "button:has-text('>>')",
+            "a:has-text('>>')",
+        ],
+    )
+    if moved:
+        page.wait_for_timeout(450)
+    return moved
+
+
+def _find_student_row_with_pagination(page, aluno: str, max_pages: int = 5):
+    row = _find_student_row(page, aluno)
+    if row is not None:
+        return row
+
+    # Reposiciona para a primeira pagina e tenta novamente.
+    _go_to_first_grade_page(page)
+    row = _find_student_row(page, aluno)
+    if row is not None:
+        return row
+
+    for _ in range(max_pages - 1):
+        if not _go_to_next_grade_page(page):
+            break
+        row = _find_student_row(page, aluno)
+        if row is not None:
+            return row
+
+    return None
+
+
+def _fill_grade_for_student_dom_fallback(page, aluno: str, nota_texto: str) -> bool:
+        alvo = _normalize_loose(aluno)
+        if not alvo:
+                return False
+
+        for scope in _iter_scopes(page):
+                try:
+                        ok = scope.evaluate(
+                                """
+                                ({ alunoTarget, notaTexto }) => {
+                                    const normalize = (value) => {
+                                        const text = (value || "")
+                                            .toString()
+                                            .toLowerCase()
+                                            .normalize("NFD")
+                                            .replace(/[\u0300-\u036f]/g, "")
+                                            .replace(/[^a-z0-9\\s]/g, " ")
+                                            .replace(/\\s+/g, " ")
+                                            .trim();
+                                        return text;
+                                    };
+
+                                    const target = normalize(alunoTarget);
+                                    if (!target) return false;
+
+                                    const candidates = Array.from(document.querySelectorAll("tr, li, div, td, span"));
+                                    for (const el of candidates) {
+                                        const txt = normalize(el.textContent || "");
+                                        if (!txt || !txt.includes(target)) continue;
+
+                                        let container = el;
+                                        for (let i = 0; i < 5 && container; i += 1) {
+                                            const inp = container.querySelector("input[type='text'], input[type='number'], textarea, [contenteditable='true']");
+                                            if (inp) {
+                                                inp.focus();
+                                                if (inp.matches("[contenteditable='true']")) {
+                                                    inp.textContent = notaTexto;
+                                                } else {
+                                                    inp.value = notaTexto;
+                                                }
+                                                inp.dispatchEvent(new Event("input", { bubbles: true }));
+                                                inp.dispatchEvent(new Event("change", { bubbles: true }));
+                                                inp.dispatchEvent(new Event("blur", { bubbles: true }));
+                                                return true;
+                                            }
+                                            container = container.parentElement;
+                                        }
+                                    }
+                                    return false;
+                                }
+                                """,
+                                {"alunoTarget": alvo, "notaTexto": nota_texto},
+                        )
+                        if ok:
+                                return True
+                except Exception:  # noqa: BLE001
+                        continue
+
+        return False
+
+
 def _fill_grade_for_student(page, aluno: str, nota: float, logger: Optional[LogFn]) -> bool:
     nota_texto = str(nota).replace(".", ",")
-    row = _find_student_row(page, aluno)
+    row = _find_student_row_with_pagination(page, aluno)
     if row is None:
+        if _fill_grade_for_student_dom_fallback(page, aluno, nota_texto):
+            _log(logger, f"Nota preenchida via fallback DOM para aluno: {aluno}")
+            return True
         _capture_stage_debug(page, stage="student_not_found", logger=logger)
         _log(logger, f"Aviso: aluno nao localizado na grade: {aluno}")
         return False
 
     inputs = row.locator("input[type='text'], input[type='number']")
+    if inputs.count() == 0:
+        # Fallback para grids que usam textarea/campo editavel por celula.
+        inputs = row.locator("textarea, [contenteditable='true']")
+
     if inputs.count() == 0:
         _log(logger, f"Aviso: campo de nota nao encontrado para aluno: {aluno}")
         return False
@@ -1391,6 +1957,9 @@ def _fill_grade_for_student(page, aluno: str, nota: float, logger: Optional[LogF
         cell.fill(nota_texto, timeout=ACTION_TIMEOUT_MS)
         return True
     except Exception as exc:  # noqa: BLE001
+        if _fill_grade_for_student_dom_fallback(page, aluno, nota_texto):
+            _log(logger, f"Nota preenchida via fallback DOM para aluno: {aluno}")
+            return True
         _log(logger, f"Erro ao preencher nota de {aluno}: {exc}")
         return False
 
@@ -1450,6 +2019,8 @@ def _confirm_save(page, logger: Optional[LogFn]) -> None:
     submit = _first_visible(
         page,
         [
+            "button:has-text('Confirmar e voltar')",
+            "input[type='submit'][value*='Confirmar e voltar']",
             "button:has-text('Confirma')",
             "input[type='submit'][value*='Confirma']",
             "button:has-text('Salvar')",
@@ -1463,6 +2034,8 @@ def _confirm_save(page, logger: Optional[LogFn]) -> None:
             submit = _first_visible(
                 scope,
                 [
+                    "button:has-text('Confirmar e voltar')",
+                    "input[type='submit'][value*='Confirmar e voltar']",
                     "button:has-text('Confirma')",
                     "input[type='submit'][value*='Confirma']",
                     "button:has-text('Salvar')",
@@ -1484,6 +2057,16 @@ def _confirm_save(page, logger: Optional[LogFn]) -> None:
         pass
 
 
+def _finalize_sge_session(page, logger: Optional[LogFn]) -> None:
+    clicou_inicio = _click_text_any_scope(page, "Inicio") or _click_text_any_scope(page, "Início")
+    if clicou_inicio:
+        page.wait_for_timeout(700)
+    clicou_sair = _click_text_any_scope(page, "Sair")
+    if clicou_sair:
+        page.wait_for_timeout(400)
+    _log(logger, "Fluxo finalizado com tentativa de clique em Inicio/Início e Sair.")
+
+
 def _group_for_launch(registros: List[RegistroNota]):
     grouped: Dict[Tuple[str, str, str, str, str], List[RegistroNota]] = defaultdict(list)
     for reg in registros:
@@ -1497,6 +2080,7 @@ def executar_lancamento(
     logger: Optional[LogFn] = print,
     dry_run: bool = False,
 ) -> Dict[str, int]:
+    _log(logger, f"Versao automacao SGE: {AUTOMATION_VERSION}")
     cpf = _resolve_env_credential(SGE_CPF, "SGE_CPF", logger=logger, digits_only=True)
     cpf = _normalize_cpf_for_sge(cpf, logger=logger)
     senha = _resolve_env_credential(SGE_SENHA, "SGE_SENHA", logger=logger, digits_only=False)
@@ -1543,7 +2127,19 @@ def executar_lancamento(
 
             contexto = ContextoTurma(escola=escola, turno=turno, turma=turma, trimestre=trimestre)
             _select_context(page, contexto, logger=logger)
-            _select_activity(page, atividade, logger=logger)
+
+            abriu_avaliacao = _open_assessment_icon_for_context(page, contexto, logger=logger)
+            if not abriu_avaliacao:
+                _log(logger, "Aviso: nao foi possivel abrir Avaliacao pela linha da turma; seguindo com fallbacks.")
+
+            atividade_ok = _select_activity(page, atividade, logger=logger)
+            if not atividade_ok:
+                abriu_grade = _open_grade_screen(page, logger=logger)
+                if abriu_grade:
+                    atividade_ok = _select_activity(page, atividade, logger=logger)
+
+            if not atividade_ok:
+                _log(logger, "Aviso: atividade nao confirmada; tentando preencher mesmo assim com fallbacks de grade.")
 
             regs_ok_bloco: List[RegistroNota] = []
             for reg in itens:
@@ -1556,6 +2152,8 @@ def executar_lancamento(
 
             _confirm_save(page, logger=logger)
             _update_launch_status_for_notes(regs_ok_bloco, logger=logger)
+
+        _finalize_sge_session(page, logger=logger)
 
         context.close()
         browser.close()
