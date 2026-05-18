@@ -120,8 +120,11 @@ def _normalize(s: str) -> str:
     text = (s or "").strip().lower()
     # Uniformiza ordinais usados em serie/trimestre: 6º == 6o, 2° == 2o.
     text = text.replace("º", "o").replace("°", "o").replace("ª", "a")
+    text = text.replace("\u00a0", " ")
     text = unicodedata.normalize("NFKD", text)
     text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    # Remove caracteres invisiveis de controle/formato (ex.: zero-width space).
+    text = "".join(ch for ch in text if unicodedata.category(ch) not in {"Cf", "Cc"})
     return re.sub(r"\s+", " ", text)
 
 
@@ -1670,12 +1673,12 @@ def _collect_student_slots(scope) -> List[Dict[str, str]]:
     try:
         slots = scope.eval_on_selector_all(
             "input[name^='_ALUMATNOM_'], span[id^='span__ALUMATNOM_']",
-            """
+                        r"""
             (els) => {
               const out = [];
               for (const el of els) {
                 const attr = (el.getAttribute('name') || el.getAttribute('id') || '').trim();
-                const m = attr.match(/_ALUMATNOM_(\\d{4})$/);
+                                const m = attr.match(/_ALUMATNOM_(\d{4})$/);
                 if (!m) continue;
                 const suffix = m[1];
                 const raw = (el.value ?? el.textContent ?? '').trim();
