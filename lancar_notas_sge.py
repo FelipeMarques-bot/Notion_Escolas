@@ -1,4 +1,5 @@
 import argparse
+import difflib
 import os
 import re
 import time
@@ -281,6 +282,54 @@ def _student_name_matches(expected: str, current: str) -> bool:
     common = set(ta).intersection(tb)
     same_ends = ta[0] == tb[0] and ta[-1] == tb[-1]
     return same_ends and len(common) >= max(2, min(len(ta), len(tb)) - 1)
+
+
+def _pick_best_student_slot(expected: str, slots: List[Dict[str, str]]) -> Optional[Dict[str, str]]:
+    alvo = _normalize_loose(expected)
+    if not alvo:
+        return None
+
+    # 1) Match deterministico primeiro.
+    for slot in slots:
+        atual = str(slot.get("aluno", ""))
+        if _student_name_matches(expected, atual):
+            return slot
+
+    # 2) Fallback por similaridade com guardrails para evitar aluno errado.
+    alvo_tokens = [t for t in alvo.split() if t]
+    if not alvo_tokens:
+        return None
+    alvo_first = alvo_tokens[0]
+
+    best: Optional[Dict[str, str]] = None
+    best_score = 0.0
+
+    for slot in slots:
+        atual_raw = str(slot.get("aluno", ""))
+        atual = _normalize_loose(atual_raw)
+        if not atual:
+            continue
+        atual_tokens = [t for t in atual.split() if t]
+        if not atual_tokens:
+            continue
+
+        # Evita casar alunos diferentes: primeiro token deve coincidir.
+        if atual_tokens[0] != alvo_first:
+            continue
+
+        overlap = len(set(alvo_tokens).intersection(atual_tokens))
+        ratio = difflib.SequenceMatcher(None, alvo, atual).ratio()
+        score = ratio + (0.03 * overlap)
+
+        if score > best_score:
+            best_score = score
+            best = slot
+
+    if best is None:
+        return None
+
+    # Threshold conservador para impedir falso positivo.
+    return best if best_score >= 0.90 else None
 
 
 def _safe_notion_call(fn):
@@ -1688,12 +1737,9 @@ def _try_fill_grade_for_student_on_current_page(page, aluno: str, nota_texto: st
         if not slots:
             continue
 
-        # 1) Match exato/forte de nome.
-        for slot in slots:
-            aluno_tela = str(slot.get("aluno", ""))
-            if _student_name_matches(aluno, aluno_tela):
-                if _try_fill_grade_by_suffix(scope, str(slot.get("suffix", "")), nota_texto):
-                    return True
+        slot = _pick_best_student_slot(aluno, slots)
+        if slot and _try_fill_grade_by_suffix(scope, str(slot.get("suffix", "")), nota_texto):
+            return True
 
     return False
 
@@ -1715,11 +1761,27 @@ def _fill_grade_for_student_by_indexed_inputs(page, aluno: str, nota_texto: str,
     return False
 
 
+def _sample_students_from_current_grade_page(page, limit: int = 12) -> List[str]:
+    sample: List[str] = []
+    for scope in _iter_scopes(page):
+        for slot in _collect_student_slots(scope):
+            nome = str(slot.get("aluno", "")).strip()
+            if nome:
+                sample.append(nome)
+            if len(sample) >= limit:
+                return sample
+    return sample
+
+
 def _fill_grade_for_student(page, aluno: str, nota: float, logger: Optional[LogFn]) -> bool:
     nota_texto = str(nota).replace(".", ",")
 
     if _fill_grade_for_student_by_indexed_inputs(page, aluno, nota_texto):
         return True
+
+    amostra = _sample_students_from_current_grade_page(page, limit=12)
+    if amostra:
+        _log(logger, f"Diagnostico: aluno alvo='{aluno}' nao casou via campos indexados. Amostra da pagina: {', '.join(amostra)}")
 
     row = _find_student_row_with_pagination(page, aluno)
     if row is None:
@@ -1792,6 +1854,55 @@ def _update_launch_status_for_notes(registros: List[RegistroNota], logger: Optio
             _log(logger, f"Aviso: falha ao atualizar status de lancamento ({reg.aluno}): {exc}")
 
     _log(logger, f"Status de lancamento atualizado em {atualizados} nota(s). Falhas: {falhas}")
+
+
+def _mark_failed_launch_status_for_notes(registros: List[RegistroNota], logger: Optional[LogFn]) -> None:
+    if not registros:
+        return
+    if not NOTION_TOKEN:
+        return
+
+    notion = Client(auth=NOTION_TOKEN)
+    atualizados = 0
+    falhas = 0
+    vistos = set()
+
+    for reg in registros:
+        page_id = _normalize_notion_id(reg.notion_page_id)
+        status_prop = (reg.notion_status_prop or "").strip()
+        if not page_id or not status_prop:
+            continue
+
+        chave = (page_id, status_prop)
+        if chave in vistos:
+            continue
+        vistos.add(chave)
+
+        try:
+            page = _safe_notion_call(lambda page_id=page_id: notion.pages.retrieve(page_id=page_id))
+            props = page.get("properties", {})
+            status_prop_real = _resolve_existing_status_prop(props, status_prop)
+            prop_info = props.get(status_prop_real, {})
+            ptype = prop_info.get("type")
+
+            if ptype == "select":
+                payload = {status_prop_real: {"select": {"name": "Falha"}}}
+            elif ptype == "checkbox":
+                payload = {status_prop_real: {"checkbox": False}}
+            elif ptype == "rich_text":
+                payload = {status_prop_real: {"rich_text": _make_rich_text("Falha")}}
+            else:
+                falhas += 1
+                continue
+
+            _safe_notion_call(
+                lambda page_id=page_id, payload=payload: notion.pages.update(page_id=page_id, properties=payload)
+            )
+            atualizados += 1
+        except Exception:  # noqa: BLE001
+            falhas += 1
+
+    _log(logger, f"Status de falha atualizado em {atualizados} nota(s). Falhas: {falhas}")
 
 
 def _confirm_save(page, logger: Optional[LogFn]) -> None:
@@ -1901,6 +2012,7 @@ def executar_lancamento(
             _select_activity(page, atividade, logger=logger)
 
             regs_ok_bloco: List[RegistroNota] = []
+            regs_fail_bloco: List[RegistroNota] = []
             for reg in itens:
                 ok = _fill_grade_for_student(page, reg.aluno, reg.nota, logger=logger)
                 if ok:
@@ -1908,12 +2020,14 @@ def executar_lancamento(
                     regs_ok_bloco.append(reg)
                 else:
                     falhas += 1
+                    regs_fail_bloco.append(reg)
 
             if regs_ok_bloco:
                 _confirm_save(page, logger=logger)
             else:
                 _log(logger, "Aviso: nenhum aluno preenchido no bloco; confirmacao foi ignorada.")
             _update_launch_status_for_notes(regs_ok_bloco, logger=logger)
+            _mark_failed_launch_status_for_notes(regs_fail_bloco, logger=logger)
 
         context.close()
         browser.close()
