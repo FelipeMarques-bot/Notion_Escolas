@@ -1317,6 +1317,20 @@ def _extract_first_number(text: str) -> str:
     return match.group(1) if match else ""
 
 
+def _extract_turma_number(text: str) -> str:
+    raw = text or ""
+    # Preferencial: "Turma 1"
+    match = re.search(r"turma\s*(\d+)", raw, flags=re.IGNORECASE)
+    if match:
+        return match.group(1)
+
+    # Caso digitado como "6º Ano1".
+    match = re.search(r"ano\s*(\d+)\s*$", raw, flags=re.IGNORECASE)
+    if match:
+        return match.group(1)
+    return ""
+
+
 def _turno_code(turno: str) -> str:
     norm = _normalize(turno)
     if "matutino" in norm:
@@ -1330,7 +1344,7 @@ def _turno_code(turno: str) -> str:
 
 def _set_filters_on_portal(page, contexto: ContextoTurma, logger: Optional[LogFn]) -> None:
     etapa = _extract_first_number(contexto.turma)
-    turma = _extract_first_number(contexto.turma)
+    turma = _extract_turma_number(contexto.turma)
     turno = _turno_code(contexto.turno)
 
     for scope in _iter_scopes(page):
@@ -1344,8 +1358,8 @@ def _set_filters_on_portal(page, contexto: ContextoTurma, logger: Optional[LogFn
                 turno_sel.first.select_option(value=turno)
 
             turma_in = scope.locator("input[name='W0019_TURNUMFILTRODISC']")
-            if turma_in.count() > 0 and turma:
-                turma_in.first.fill(turma)
+            if turma_in.count() > 0:
+                turma_in.first.fill(turma or "0")
 
             if _click_any_selector_any_scope(
                 page,
@@ -1367,12 +1381,19 @@ def _set_filters_on_portal(page, contexto: ContextoTurma, logger: Optional[LogFn
 def _open_assessment_for_context(page, contexto: ContextoTurma, logger: Optional[LogFn]) -> bool:
     _set_filters_on_portal(page, contexto, logger=logger)
 
-    turma_num = _extract_first_number(contexto.turma)
+    turma_num = _extract_turma_number(contexto.turma)
     trimestre_num = _extract_first_number(contexto.trimestre)
     turno_norm = _normalize(contexto.turno).upper()
 
     for scope in _iter_scopes(page):
-        hidden_rows = scope.locator("input[name^='W0019W0075_TURNUMSTR_']")
+        # Aguarda o grid responder ao filtro antes de procurar a linha.
+        for _ in range(8):
+            hidden_rows = scope.locator("input[name^='W0019W0075_TURNUMSTR_']")
+            total = hidden_rows.count()
+            if total > 0:
+                break
+            page.wait_for_timeout(300)
+
         total = hidden_rows.count()
         for idx in range(total):
             cell = hidden_rows.nth(idx)
@@ -1383,7 +1404,7 @@ def _open_assessment_for_context(page, contexto: ContextoTurma, logger: Optional
 
             norm = _normalize(label)
             ok_turno = bool(turno_norm and _normalize(turno_norm) in norm)
-            ok_turma = bool(turma_num and re.search(rf"\b{re.escape(turma_num)}\b", norm))
+            ok_turma = True if not turma_num else bool(re.search(rf"\bturma\s*{re.escape(turma_num)}\b", norm))
             ok_trim = bool(trimestre_num and f"{trimestre_num}o trimestre" in norm)
             if not (ok_turno and ok_turma and ok_trim):
                 continue
@@ -1395,7 +1416,12 @@ def _open_assessment_for_context(page, contexto: ContextoTurma, logger: Optional
                 if icon.count() == 0:
                     continue
 
-                icon.first.click(timeout=ACTION_TIMEOUT_MS)
+                node = icon.first
+                anchor = node.locator("xpath=ancestor::a[1]")
+                if anchor.count() > 0:
+                    anchor.first.click(timeout=ACTION_TIMEOUT_MS)
+                else:
+                    node.click(timeout=ACTION_TIMEOUT_MS)
                 page.wait_for_timeout(900)
                 _log(logger, f"Avaliacao aberta pela linha de turma: {label}")
                 return True
