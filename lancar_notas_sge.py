@@ -1588,7 +1588,7 @@ def _collect_student_slots(scope) -> List[Dict[str, str]]:
               const out = [];
               for (const el of els) {
                 const attr = (el.getAttribute('name') || el.getAttribute('id') || '').trim();
-                const m = attr.match(/_ALUMATNOM_(\d{4})$/);
+                const m = attr.match(/_ALUMATNOM_(\\d{4})$/);
                 if (!m) continue;
                 const suffix = m[1];
                 const raw = (el.value ?? el.textContent ?? '').trim();
