@@ -1579,8 +1579,51 @@ def _find_student_row_with_pagination(page, aluno: str, max_pages: int = 5):
     return None
 
 
+def _fill_grade_for_student_by_indexed_inputs(page, aluno: str, nota_texto: str) -> bool:
+    alvo = _normalize_loose(aluno)
+    if not alvo:
+        return False
+
+    for scope in _iter_scopes(page):
+        try:
+            names = scope.locator("input[name^='_ALUMATNOM_']")
+            total = names.count()
+        except Exception:  # noqa: BLE001
+            continue
+
+        for idx in range(total):
+            node = names.nth(idx)
+            try:
+                aluno_tela = (node.input_value(timeout=400) or "").strip()
+            except Exception:  # noqa: BLE001
+                continue
+
+            if _normalize_loose(aluno_tela) != alvo:
+                continue
+
+            try:
+                suffix = (node.get_attribute("name") or "").rsplit("_", 1)[-1]
+                nota_field = scope.locator(f"input[name='_NOTA_{suffix}']")
+                if nota_field.count() == 0:
+                    continue
+
+                field = nota_field.first
+                field.click(timeout=ACTION_TIMEOUT_MS)
+                field.fill(nota_texto, timeout=ACTION_TIMEOUT_MS)
+                field.dispatch_event("change")
+                return True
+            except Exception:  # noqa: BLE001
+                continue
+
+    return False
+
+
 def _fill_grade_for_student(page, aluno: str, nota: float, logger: Optional[LogFn]) -> bool:
     nota_texto = str(nota).replace(".", ",")
+
+    if _fill_grade_for_student_by_indexed_inputs(page, aluno, nota_texto):
+        return True
+
     row = _find_student_row_with_pagination(page, aluno)
     if row is None:
         _capture_stage_debug(page, stage="student_not_found", logger=logger)
@@ -1684,7 +1727,10 @@ def _confirm_save(page, logger: Optional[LogFn]) -> None:
         _log(logger, "Aviso: botao de confirmacao nao encontrado; seguindo para o proximo bloco.")
         return
 
-    submit.click(timeout=ACTION_TIMEOUT_MS)
+    try:
+        submit.click(timeout=ACTION_TIMEOUT_MS, no_wait_after=True)
+    except TypeError:
+        submit.click(timeout=ACTION_TIMEOUT_MS)
     try:
         page.wait_for_timeout(800)
     except Exception:  # noqa: BLE001
@@ -1765,7 +1811,10 @@ def executar_lancamento(
                 else:
                     falhas += 1
 
-            _confirm_save(page, logger=logger)
+            if regs_ok_bloco:
+                _confirm_save(page, logger=logger)
+            else:
+                _log(logger, "Aviso: nenhum aluno preenchido no bloco; confirmacao foi ignorada.")
             _update_launch_status_for_notes(regs_ok_bloco, logger=logger)
 
         context.close()
