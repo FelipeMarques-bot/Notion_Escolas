@@ -718,7 +718,7 @@ def _infer_context(parts: Iterable[str]) -> ContextoTurma:
                     break
 
         if not turma:
-            found = re.search(r"([6-9][oº]?\s*Ano)", p, flags=re.IGNORECASE)
+            found = re.search(r"([6-9][oº]?\s*Ano(?:\s*\d+)?)", p, flags=re.IGNORECASE)
             if found:
                 turma = found.group(1).replace("º", "o")
 

@@ -33,6 +33,8 @@ on:
         options:
           - "Todas"
           - "6º Ano"
+          - "6º Ano 1"
+          - "6º Ano 2"
           - "7º Ano"
           - "8º Ano"
           - "9º Ano"
