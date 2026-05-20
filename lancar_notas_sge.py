@@ -980,9 +980,12 @@ def carregar_notas_notion(
     return registros
 
 
-def listar_contextos_disponiveis(logger: Optional[LogFn] = None) -> List[Dict[str, str]]:
+def listar_contextos_disponiveis(
+    logger: Optional[LogFn] = None,
+    filtro: Optional[Dict[str, str]] = None,
+) -> List[Dict[str, str]]:
     try:
-        registros = carregar_notas_notion(logger=logger)
+        registros = carregar_notas_notion(logger=logger, filtro=filtro)
         contextos = {
             (r.escola, r.turno, r.turma, r.trimestre)
             for r in registros
@@ -1017,6 +1020,8 @@ def listar_contextos_disponiveis(logger: Optional[LogFn] = None) -> List[Dict[st
             continue
 
         ctx = _infer_context([*breadcrumb, title])
+        if not _context_matches_filter(ctx, filtro):
+            continue
         if "nao identificado" in ctx.turno.lower() or "nao identificado" in ctx.turma.lower():
             continue
         contextos.add((ctx.escola, ctx.turno, ctx.turma, ctx.trimestre))

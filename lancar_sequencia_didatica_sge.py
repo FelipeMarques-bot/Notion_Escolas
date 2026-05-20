@@ -1239,7 +1239,17 @@ def executar_lancamento_sequencia(
         raise LancamentoError("SGE_CPF/SGE_SENHA estao com placeholders. Atualize com valores reais.")
 
     registros = _load_sequencias_from_notion(logger=logger)
-    contextos = _filter_contexts(listar_contextos_disponiveis(logger=logger), escola=escola, trimestre=trimestre)
+    filtro_contexto: Dict[str, str] = {}
+    if escola:
+        filtro_contexto["escola"] = escola
+    if trimestre:
+        filtro_contexto["trimestre"] = trimestre
+
+    contextos = _filter_contexts(
+        listar_contextos_disponiveis(logger=logger, filtro=filtro_contexto),
+        escola=escola,
+        trimestre=trimestre,
+    )
 
     if not contextos:
         raise LancamentoError("Nenhum contexto de turma encontrado para executar Plano de Aulas.")
