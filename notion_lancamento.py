@@ -717,6 +717,18 @@ def propriedades_database_sequencia_didatica(titulo_prop="Name"):
         titulo_prop: {
             "title": {},
         },
+        "Escola": {
+            "select": {
+                "options": [
+                    {"name": "Juvenal", "color": "blue"},
+                    {"name": "Arapongas", "color": "green"},
+                    {"name": "Mulde", "color": "yellow"},
+                    {"name": "Anna Alves", "color": "orange"},
+                    {"name": "Tancredo", "color": "purple"},
+                    {"name": "Maria Helena", "color": "pink"},
+                ]
+            },
+        },
         "Ano": {
             "select": {
                 "options": [
@@ -727,7 +739,18 @@ def propriedades_database_sequencia_didatica(titulo_prop="Name"):
                 ]
             },
         },
-        "Período": {
+        "Periodo inicio": {
+            "date": {},
+        },
+        "Periodo fim": {
+            "date": {},
+        },
+        "N aulas": {
+            "number": {
+                "format": "number",
+            },
+        },
+        "Titulo Documento": {
             "rich_text": {},
         },
         "Arquivo PDF": {
@@ -735,6 +758,21 @@ def propriedades_database_sequencia_didatica(titulo_prop="Name"):
         },
         "Ativo": {
             "checkbox": {},
+        },
+        "Status lancamento": {
+            "select": {
+                "options": [
+                    {"name": "Pendente", "color": "yellow"},
+                    {"name": "Concluido", "color": "green"},
+                    {"name": "Erro", "color": "red"},
+                ]
+            },
+        },
+        "Ultima execucao": {
+            "date": {},
+        },
+        "Log execucao": {
+            "rich_text": {},
         },
         "Observações": {
             "rich_text": {},
