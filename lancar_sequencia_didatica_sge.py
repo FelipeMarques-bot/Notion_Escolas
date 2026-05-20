@@ -263,6 +263,38 @@ def _ano_from_turma(turma: str) -> str:
     return f"{m.group(1)}º Ano" if m else ""
 
 
+def _canon_turma_label(value: str) -> str:
+    text = _normalize(value or "")
+    m = re.search(r"\b([6-9])\s*o?\s*ano(?:\s*(\d+))?\b", text)
+    if not m:
+        return ""
+
+    serie = m.group(1)
+    sufixo = (m.group(2) or "").strip()
+    return f"{serie}º Ano {sufixo}".strip()
+
+
+def _turma_matches(expected: str, actual: str) -> bool:
+    e_norm = _normalize(expected or "")
+    a_norm = _normalize(actual or "")
+    if not e_norm or not a_norm:
+        return False
+
+    e_canon = _canon_turma_label(expected)
+    a_canon = _canon_turma_label(actual)
+
+    if e_canon and a_canon and _normalize(e_canon) == _normalize(a_canon):
+        return True
+    if e_norm == a_norm:
+        return True
+
+    # Compatibilidade: "6º Ano" deve casar com "6º Ano 1" e "6º Ano 2".
+    if e_canon and a_canon:
+        return _normalize(a_canon).startswith(_normalize(e_canon))
+
+    return a_norm.startswith(e_norm)
+
+
 def _normalize_ano_label(value: str) -> str:
     text = _normalize(value or "")
     m = re.search(r"\b([6-9])\s*o?\s*ano\b", text)
@@ -707,7 +739,7 @@ def _filter_contexts(contextos_raw: List[Dict[str, str]], escola: str, trimestre
             continue
         if trimestre and _normalize(ctx.trimestre) != _normalize(trimestre):
             continue
-        if turma and _normalize(ctx.turma) != _normalize(turma):
+        if turma and not _turma_matches(turma, ctx.turma):
             continue
         filtered.append(ctx)
     return filtered
@@ -1289,6 +1321,8 @@ def executar_lancamento_sequencia(
 
     registros = _load_sequencias_from_notion(logger=logger, ensure_status_property=(not modo_rapido))
 
+    turma_input = _canon_turma_label(turma) or turma
+
     contextos: List[ContextoPlano] = []
     if modo_rapido and escola and turma:
         turnos = _turnos_por_escola(escola)
@@ -1297,7 +1331,7 @@ def executar_lancamento_sequencia(
             turnos = ["Matutino", "Vespertino"]
 
         contextos = [
-            ContextoPlano(escola=escola, turno=turno, turma=turma, trimestre=trimestre)
+            ContextoPlano(escola=escola, turno=turno, turma=turma_input, trimestre=trimestre)
             for turno in turnos
         ]
         _log(logger, f"Modo rapido: usando contexto direto sem descoberta no Notion ({len(contextos)} turno(s)).")
@@ -1308,13 +1342,13 @@ def executar_lancamento_sequencia(
         if trimestre:
             filtro_contexto["trimestre"] = trimestre
         if turma:
-            filtro_contexto["turma"] = turma
+            filtro_contexto["turma"] = turma_input
 
         contextos = _filter_contexts(
             listar_contextos_disponiveis(logger=logger, filtro=filtro_contexto),
             escola=escola,
             trimestre=trimestre,
-            turma=turma,
+            turma=turma_input,
         )
 
     if not contextos:
