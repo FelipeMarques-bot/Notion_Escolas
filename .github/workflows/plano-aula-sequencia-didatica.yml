@@ -1,0 +1,107 @@
+name: Plano de Aula - Sequência Didática
+
+on:
+  workflow_dispatch:
+    inputs:
+      arquivo_6_ano:
+        description: Nome do arquivo PDF para 6º ano (somente nome)
+        required: false
+        default: ""
+        type: string
+      arquivo_7_ano:
+        description: Nome do arquivo PDF para 7º ano (somente nome)
+        required: false
+        default: ""
+        type: string
+      arquivo_8_ano:
+        description: Nome do arquivo PDF para 8º ano (somente nome)
+        required: false
+        default: ""
+        type: string
+      arquivo_9_ano:
+        description: Nome do arquivo PDF para 9º ano (somente nome)
+        required: false
+        default: ""
+        type: string
+      data_inicio:
+        description: Data de início para criação no SGE (YYYY-MM-DD)
+        required: true
+        type: string
+      data_fim:
+        description: Data de fim para criação no SGE (YYYY-MM-DD)
+        required: true
+        type: string
+      escola:
+        description: Escola alvo (opcional)
+        required: false
+        default: "Todas"
+        type: choice
+        options:
+          - "Todas"
+          - "Juvenal"
+          - "Arapongas"
+          - "Mulde"
+          - "Anna Alves"
+          - "Tancredo"
+          - "Maria Helena"
+      modo_execucao:
+        description: Estratégia de execução planejada
+        required: true
+        default: "por_escola"
+        type: choice
+        options:
+          - "por_escola"
+          - "por_turma_em_todas_as_escolas"
+      dry_run:
+        description: Executa apenas validações (sem lançamento no SGE)
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+jobs:
+  preparar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Validar parâmetros obrigatórios
+        shell: bash
+        env:
+          DATA_INICIO: ${{ github.event.inputs.data_inicio }}
+          DATA_FIM: ${{ github.event.inputs.data_fim }}
+          ARQ_6: ${{ github.event.inputs.arquivo_6_ano }}
+          ARQ_7: ${{ github.event.inputs.arquivo_7_ano }}
+          ARQ_8: ${{ github.event.inputs.arquivo_8_ano }}
+          ARQ_9: ${{ github.event.inputs.arquivo_9_ano }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$DATA_INICIO" || -z "$DATA_FIM" ]]; then
+            echo "Erro: data_inicio e data_fim são obrigatórias."
+            exit 1
+          fi
+
+          if [[ -z "$ARQ_6" && -z "$ARQ_7" && -z "$ARQ_8" && -z "$ARQ_9" ]]; then
+            echo "Erro: informe ao menos um nome de arquivo (6º, 7º, 8º ou 9º ano)."
+            exit 1
+          fi
+
+      - name: Resumo de execução
+        run: |
+          echo "Workflow preparado para Sequência Didática (Plano de Aula)."
+          echo "Este fluxo ainda não executa automação Playwright; apenas recebe os campos solicitados."
+          echo "6º ano: ${{ github.event.inputs.arquivo_6_ano }}"
+          echo "7º ano: ${{ github.event.inputs.arquivo_7_ano }}"
+          echo "8º ano: ${{ github.event.inputs.arquivo_8_ano }}"
+          echo "9º ano: ${{ github.event.inputs.arquivo_9_ano }}"
+          echo "Data início: ${{ github.event.inputs.data_inicio }}"
+          echo "Data fim: ${{ github.event.inputs.data_fim }}"
+          echo "Escola: ${{ github.event.inputs.escola }}"
+          echo "Modo: ${{ github.event.inputs.modo_execucao }}"
+          echo "Dry-run: ${{ github.event.inputs.dry_run }}"

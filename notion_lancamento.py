@@ -18,6 +18,60 @@ ARQUIVO_ALUNOS_XLSX = os.environ.get("ARQUIVO_ALUNOS_XLSX", "Notas Escolas - 2°
 TRIMESTRE_IMPORTACAO_ALUNOS = os.environ.get("TRIMESTRE_IMPORTACAO_ALUNOS", "2º Trimestre")
 
 
+def _is_placeholder_value(value):
+    return (value or "").strip().lower() in {
+        "***",
+        "your_token_here",
+        "your_root_page_id_here",
+        "seu_token",
+        "id_da_pagina_raiz",
+    }
+
+
+def _normalize_notion_id(value):
+    raw = (value or "").strip().strip('"').strip("'")
+    if not raw:
+        return ""
+
+    # Aceita UUID com/sem hifens ou URL do Notion contendo o id.
+    match = re.search(
+        r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-fA-F]{32})",
+        raw,
+    )
+    if not match:
+        return raw
+
+    token = match.group(1).replace("-", "").lower()
+    if len(token) != 32:
+        return raw
+    return f"{token[:8]}-{token[8:12]}-{token[12:16]}-{token[16:20]}-{token[20:32]}"
+
+
+def validar_ambiente_notion():
+    global ROOT_PAGE_ID
+
+    erros = []
+    token = (NOTION_TOKEN or "").strip()
+    root = _normalize_notion_id(ROOT_PAGE_ID)
+
+    if not token or _is_placeholder_value(token):
+        erros.append("NOTION_TOKEN ausente ou com valor de placeholder")
+
+    if not root or _is_placeholder_value(root):
+        erros.append("ROOT_PAGE_ID ausente ou com valor de placeholder")
+    elif not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", root):
+        erros.append("ROOT_PAGE_ID invalido (esperado UUID do Notion)")
+
+    if erros:
+        print("Erro de configuração do Notion:")
+        for err in erros:
+            print(f"- {err}")
+        print("Dica: em GitHub Actions, confira Settings > Secrets and variables > Actions.")
+        raise SystemExit(2)
+
+    ROOT_PAGE_ID = root
+
+
 def executar_notion_com_retry(funcao, tentativas=8, espera_base=1.0):
     ultima_excecao = None
     for tentativa in range(1, tentativas + 1):
@@ -658,6 +712,39 @@ def propriedades_database_solicitacao_escola(titulo_prop="Name"):
     }
 
 
+def propriedades_database_sequencia_didatica(titulo_prop="Name"):
+    return {
+        titulo_prop: {
+            "title": {},
+        },
+        "Ano": {
+            "select": {
+                "options": [
+                    {"name": "6º Ano", "color": "blue"},
+                    {"name": "7º Ano", "color": "green"},
+                    {"name": "8º Ano", "color": "yellow"},
+                    {"name": "9º Ano", "color": "red"},
+                ]
+            },
+        },
+        "Período": {
+            "rich_text": {},
+        },
+        "Arquivo PDF": {
+            "files": {},
+        },
+        "Ativo": {
+            "checkbox": {},
+        },
+        "Observações": {
+            "rich_text": {},
+        },
+        "Última Atualização": {
+            "last_edited_time": {},
+        },
+    }
+
+
 def criar_ou_atualizar_database_solicitacao_escola(parent_page_id, nome_escola):
     titulo = f"Solicitacoes SGE - {nome_escola}"
     existente_id = encontrar_database_filho(parent_page_id, titulo)
@@ -689,6 +776,41 @@ def criar_ou_atualizar_database_solicitacao_escola(parent_page_id, nome_escola):
         executar_notion_com_retry(lambda: notion.data_sources.update(
             data_source_id=data_source_id,
             properties=propriedades_database_solicitacao_escola(titulo_prop),
+        ))
+    return database_id, True
+
+
+def criar_ou_atualizar_database_sequencia_didatica(parent_page_id):
+    titulo = "Sequências Didáticas - PDFs"
+    existente_id = encontrar_database_filho(parent_page_id, titulo)
+
+    if existente_id:
+        executar_notion_com_retry(lambda: notion.databases.update(
+            database_id=existente_id,
+            title=[{"type": "text", "text": {"content": titulo}}],
+            icon={"type": "emoji", "emoji": "📎"},
+        ))
+        data_source_id = obter_data_source_id(existente_id)
+        if data_source_id:
+            titulo_prop = obter_nome_coluna_titulo_data_source(data_source_id)
+            executar_notion_com_retry(lambda: notion.data_sources.update(
+                data_source_id=data_source_id,
+                properties=propriedades_database_sequencia_didatica(titulo_prop),
+            ))
+        return existente_id, False
+
+    response = executar_notion_com_retry(lambda: notion.databases.create(
+        parent={"type": "page_id", "page_id": parent_page_id},
+        icon={"type": "emoji", "emoji": "📎"},
+        title=[{"type": "text", "text": {"content": titulo}}],
+    ))
+    database_id = response["id"]
+    data_source_id = obter_data_source_id(database_id)
+    if data_source_id:
+        titulo_prop = obter_nome_coluna_titulo_data_source(data_source_id)
+        executar_notion_com_retry(lambda: notion.data_sources.update(
+            data_source_id=data_source_id,
+            properties=propriedades_database_sequencia_didatica(titulo_prop),
         ))
     return database_id, True
 
@@ -1197,7 +1319,12 @@ def criar_ou_atualizar_dashboard_raiz(estrutura_escolas=None):
 
 def criar_estrutura_completa():
     portal_id = criar_ou_atualizar_portal_visual()
-    criar_ou_atualizar_dashboard_raiz()
+    dashboard_id = criar_ou_atualizar_dashboard_raiz()
+    # A database de sequencias didaticas precisa ficar visivel na pagina inicial.
+    sequencias_db_id, sequencias_db_criada = criar_ou_atualizar_database_sequencia_didatica(ROOT_PAGE_ID)
+    print(
+        f"   {'✅ Criada' if sequencias_db_criada else '♻️ Atualizada'} database de Sequências Didáticas ({sequencias_db_id})"
+    )
     alunos_por_turma = carregar_alunos_da_planilha(ARQUIVO_ALUNOS_XLSX)
     estrutura_escolas = []
 
@@ -1325,4 +1452,5 @@ def criar_estrutura_completa():
     print("\n🎉 Estrutura completa sincronizada com sucesso no Notion!")
 
 if __name__ == "__main__":
+    validar_ambiente_notion()
     criar_estrutura_completa()
