@@ -1,6 +1,7 @@
 import argparse
 import difflib
 import html
+import logging
 import os
 import re
 import time
@@ -24,6 +25,11 @@ except ImportError:  # pragma: no cover
 LogFn = Callable[[str], None]
 
 load_dotenv(override=True)
+
+# O SDK do Notion emite WARNING a cada retry de timeout/ObjectNotFound.
+# Mantemos o comportamento do script e reduzimos ruido no output do workflow.
+_notion_log_level = (os.environ.get("NOTION_CLIENT_LOG_LEVEL", "ERROR") or "ERROR").upper()
+logging.getLogger("notion_client").setLevel(getattr(logging, _notion_log_level, logging.ERROR))
 
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "")
 ROOT_PAGE_ID = os.environ.get("ROOT_PAGE_ID", "")
@@ -133,6 +139,11 @@ def _normalize_loose(s: str) -> str:
     text = _normalize(s)
     text = re.sub(r"[^a-z0-9\s]", "", text)
     return re.sub(r"\s+", " ", text).strip()
+
+
+def _name_tokens(s: str) -> List[str]:
+    stopwords = {"da", "de", "do", "das", "dos", "e"}
+    return [t for t in _normalize_loose(s).split() if t and t not in stopwords]
 
 
 def _normalize_notion_id(value: str) -> str:
@@ -287,14 +298,29 @@ def _student_name_matches(expected: str, current: str) -> bool:
         if abs(len(a_compact) - len(b_compact)) <= 2 and difflib.SequenceMatcher(None, a_compact, b_compact).ratio() >= 0.93:
             return True
 
-    ta = [t for t in a.split() if t]
-    tb = [t for t in b.split() if t]
+    ta = _name_tokens(a)
+    tb = _name_tokens(b)
     if not ta or not tb:
         return False
 
     common = set(ta).intersection(tb)
     same_ends = ta[0] == tb[0] and ta[-1] == tb[-1]
-    return same_ends and len(common) >= max(2, min(len(ta), len(tb)) - 1)
+    if same_ends and len(common) >= max(2, min(len(ta), len(tb)) - 1):
+        return True
+
+    # Tolerancia para variacao ortografica leve no primeiro nome, mantendo
+    # sobrenome final igual para evitar casar aluno incorreto.
+    same_last = ta[-1] == tb[-1]
+    first_ratio = difflib.SequenceMatcher(None, ta[0], tb[0]).ratio()
+    if same_last and first_ratio >= 0.72 and len(common) >= max(1, min(len(ta), len(tb)) - 2):
+        return True
+
+    # Ultimo sobrenome pode variar (ex.: nome composto adicional no SGE).
+    # Nesse caso exigimos maior sobreposicao de tokens significativos.
+    if first_ratio >= 0.85 and len(common) >= 2:
+        return True
+
+    return False
 
 
 def _pick_best_student_slot(expected: str, slots: List[Dict[str, str]]) -> Optional[Dict[str, str]]:
@@ -309,7 +335,7 @@ def _pick_best_student_slot(expected: str, slots: List[Dict[str, str]]) -> Optio
             return slot
 
     # 2) Fallback por similaridade com guardrails para evitar aluno errado.
-    alvo_tokens = [t for t in alvo.split() if t]
+    alvo_tokens = _name_tokens(alvo)
     if not alvo_tokens:
         return None
     alvo_first = alvo_tokens[0]
@@ -318,37 +344,54 @@ def _pick_best_student_slot(expected: str, slots: List[Dict[str, str]]) -> Optio
 
     best: Optional[Dict[str, str]] = None
     best_score = 0.0
+    best_first_ratio = 0.0
+    best_last_matches = False
 
     for slot in slots:
         atual_raw = str(slot.get("aluno", ""))
         atual = _normalize_loose(atual_raw)
         if not atual:
             continue
-        atual_tokens = [t for t in atual.split() if t]
+        atual_tokens = _name_tokens(atual)
         if not atual_tokens:
             continue
 
         # Guardrails para evitar aluno errado em fallback aproximado.
         atual_first = atual_tokens[0]
         atual_last = atual_tokens[-1]
-        if atual_last != alvo_last:
-            continue
-        if atual_first != alvo_first and not atual_first.startswith(alvo_first_prefix):
+        first_ratio = difflib.SequenceMatcher(None, alvo_first, atual_first).ratio()
+        if atual_first != alvo_first and not atual_first.startswith(alvo_first_prefix) and first_ratio < 0.72:
             continue
 
         overlap = len(set(alvo_tokens).intersection(atual_tokens))
         ratio = difflib.SequenceMatcher(None, alvo, atual).ratio()
-        score = ratio + (0.03 * overlap)
+        last_bonus = 0.06 if atual_last == alvo_last else 0.0
+        score = ratio + (0.03 * overlap) + (0.04 * first_ratio) + last_bonus
+
+        # Guardrail: sem ultimo sobrenome igual, precisa overlap forte.
+        if atual_last != alvo_last and overlap < 2:
+            continue
 
         if score > best_score:
             best_score = score
             best = slot
+            best_first_ratio = first_ratio
+            best_last_matches = atual_last == alvo_last
 
     if best is None:
         return None
 
-    # Threshold conservador para impedir falso positivo.
-    return best if best_score >= 0.90 else None
+    # Threshold conservador com pequena flexibilidade para nomes curtos.
+    if best_score >= 0.90:
+        return best
+
+    if len(alvo_tokens) <= 2 and best_last_matches and best_first_ratio >= 0.72 and best_score >= 0.84:
+        return best
+
+    if not best_last_matches and best_first_ratio >= 0.85 and best_score >= 0.86:
+        return best
+
+    return None
 
 
 def _find_student_suffix_by_html(scope, aluno: str) -> Optional[str]:
@@ -764,7 +807,26 @@ def _is_probably_grade_column(col_name: str) -> bool:
     return all(word not in lowered for word in blacklist)
 
 
-def carregar_notas_notion(logger: Optional[LogFn] = None) -> List[RegistroNota]:
+def _context_matches_filter(context: ContextoTurma, filtro: Optional[Dict[str, str]]) -> bool:
+    if not filtro:
+        return True
+
+    def match(value: str, key: str) -> bool:
+        expected = (filtro.get(key) or "").strip()
+        return True if not expected else _normalize(value) == _normalize(expected)
+
+    return (
+        match(context.escola, "escola")
+        and match(context.turno, "turno")
+        and match(context.turma, "turma")
+        and match(context.trimestre, "trimestre")
+    )
+
+
+def carregar_notas_notion(
+    logger: Optional[LogFn] = None,
+    filtro: Optional[Dict[str, str]] = None,
+) -> List[RegistroNota]:
     root_page_id = _normalize_notion_id(ROOT_PAGE_ID)
 
     if not NOTION_TOKEN or not root_page_id:
@@ -792,6 +854,11 @@ def carregar_notas_notion(logger: Optional[LogFn] = None) -> List[RegistroNota]:
         title = _database_title(db_obj) or db_title
         if not _is_notas_database(title):
             continue
+
+        context = _infer_context([*breadcrumb, title])
+        if not _context_matches_filter(context, filtro):
+            continue
+
         try:
             rows = _query_database_rows(notion, db_id, database_obj=db_obj)
         except Exception as exc:  # noqa: BLE001
@@ -801,7 +868,6 @@ def carregar_notas_notion(logger: Optional[LogFn] = None) -> List[RegistroNota]:
         if not rows:
             continue
 
-        context = _infer_context([*breadcrumb, title])
         candidatos.append(
             {
                 "db_id": db_id,
@@ -1677,6 +1743,22 @@ def _go_to_next_grade_page(page) -> bool:
             "input[type='button'][value='>>']",
             "button:has-text('>>')",
             "a:has-text('>>')",
+            "input[type='submit'][value='>']",
+            "input[type='button'][value='>']",
+            "button:text-is('>')",
+            "a:text-is('>')",
+            "input[type='submit'][value*='Prox' i]",
+            "input[type='button'][value*='Prox' i]",
+            "input[type='submit'][name*='PROX' i]",
+            "input[type='button'][name*='PROX' i]",
+            "a[title*='Próx' i]",
+            "a[title*='Prox' i]",
+            "a[aria-label*='Próx' i]",
+            "a[aria-label*='Prox' i]",
+            "a:has-text('Próximo')",
+            "button:has-text('Próximo')",
+            "a:has-text('Seguinte')",
+            "button:has-text('Seguinte')",
         ],
     )
     if moved:
@@ -1731,32 +1813,112 @@ def _collect_student_slots(scope) -> List[Dict[str, str]]:
     return []
 
 
+def _wait_student_slots(scope, attempts: int = 6, delay_ms: int = 250) -> List[Dict[str, str]]:
+    slots = _collect_student_slots(scope)
+    if slots:
+        return slots
+
+    for _ in range(max(0, attempts - 1)):
+        try:
+            scope.wait_for_timeout(delay_ms)
+        except Exception:  # noqa: BLE001
+            pass
+        slots = _collect_student_slots(scope)
+        if slots:
+            return slots
+
+    return []
+
+
+def _candidate_suffixes_for_student(expected: str, slots: List[Dict[str, str]]) -> List[str]:
+    alvo = _normalize_loose(expected)
+    if not alvo:
+        return []
+
+    scored: List[Tuple[float, str]] = []
+    seen = set()
+
+    for slot in slots:
+        suffix = str(slot.get("suffix", "")).strip()
+        atual = str(slot.get("aluno", "")).strip()
+        if not suffix or not atual:
+            continue
+
+        atual_norm = _normalize_loose(atual)
+        if not atual_norm:
+            continue
+
+        # Prioriza matches deterministas.
+        if _student_name_matches(expected, atual):
+            score = 2.0
+        else:
+            overlap = len(set(_name_tokens(alvo)).intersection(_name_tokens(atual_norm)))
+            ratio = difflib.SequenceMatcher(None, alvo, atual_norm).ratio()
+            score = ratio + (0.04 * overlap)
+
+        if suffix in seen:
+            continue
+        seen.add(suffix)
+        scored.append((score, suffix))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [suffix for _, suffix in scored]
+
+
 def _try_fill_grade_by_suffix(scope, suffix: str, nota_texto: str) -> bool:
-    selector = f"input[name='_NOTA_{suffix}'], input[id='_NOTA_{suffix}']"
+    selector = ", ".join(
+        [
+            f"input[name='_NOTA_{suffix}']",
+            f"input[id='_NOTA_{suffix}']",
+            f"input[name$='_{suffix}'][name*='NOTA' i]",
+            f"input[id$='_{suffix}'][id*='NOTA' i]",
+            f"input[name$='_{suffix}'][name*='AVAL' i]",
+            f"input[id$='_{suffix}'][id*='AVAL' i]",
+        ]
+    )
     try:
         field = scope.locator(selector)
         if field.count() == 0:
             return False
-        target = field.first
-        try:
-            target.click(timeout=ACTION_TIMEOUT_MS)
-            target.fill(nota_texto, timeout=ACTION_TIMEOUT_MS)
-            target.dispatch_event("input")
-            target.dispatch_event("change")
-            return True
-        except Exception:  # noqa: BLE001
-            pass
+
+        total = min(field.count(), 6)
+        for idx in range(total):
+            target = field.nth(idx)
+            try:
+                if target.is_disabled() or (target.get_attribute("readonly") is not None):
+                    continue
+                target.click(timeout=ACTION_TIMEOUT_MS)
+                target.fill(nota_texto, timeout=ACTION_TIMEOUT_MS)
+                target.dispatch_event("input")
+                target.dispatch_event("change")
+                return True
+            except Exception:  # noqa: BLE001
+                continue
 
         return bool(
             scope.evaluate(
                 """
                 ({ suffix, nota }) => {
-                  const el = document.querySelector(`input[name='_NOTA_${suffix}'], input[id='_NOTA_${suffix}']`);
-                  if (!el) return false;
-                  el.value = nota;
-                  el.dispatchEvent(new Event('input', { bubbles: true }));
-                  el.dispatchEvent(new Event('change', { bubbles: true }));
-                  return true;
+                  const selectors = [
+                    `input[name='_NOTA_${suffix}']`,
+                    `input[id='_NOTA_${suffix}']`,
+                    `input[name$='_${suffix}'][name*='NOTA' i]`,
+                    `input[id$='_${suffix}'][id*='NOTA' i]`,
+                    `input[name$='_${suffix}'][name*='AVAL' i]`,
+                    `input[id$='_${suffix}'][id*='AVAL' i]`,
+                  ];
+
+                  for (const sel of selectors) {
+                    const all = Array.from(document.querySelectorAll(sel));
+                    for (const el of all) {
+                      if (!el || el.disabled || el.readOnly) continue;
+                      el.value = nota;
+                      el.dispatchEvent(new Event('input', { bubbles: true }));
+                      el.dispatchEvent(new Event('change', { bubbles: true }));
+                      return true;
+                    }
+                  }
+                  return false;
                 }
                 """,
                 {"suffix": suffix, "nota": nota_texto},
@@ -1766,21 +1928,147 @@ def _try_fill_grade_by_suffix(scope, suffix: str, nota_texto: str) -> bool:
         return False
 
 
+def _try_fill_any_numeric_input_for_suffix(scope, suffix: str, nota_texto: str) -> bool:
+        # Fallback amplo: alguns layouts do SGE nao usam prefixo NOTA/AVAL no campo.
+        js = """
+        ({ suffix, nota }) => {
+            const candidates = Array.from(document.querySelectorAll('input[type="text"], input[type="number"]'));
+            const isVisible = (el) => {
+                const st = window.getComputedStyle(el);
+                return st && st.visibility !== 'hidden' && st.display !== 'none';
+            };
+
+            for (const el of candidates) {
+                const name = (el.getAttribute('name') || '').trim();
+                const id = (el.getAttribute('id') || '').trim();
+                const attrs = `${name} ${id}`;
+                if (!attrs.includes(`_${suffix}`)) continue;
+                if (el.disabled || el.readOnly) continue;
+                if (!isVisible(el)) continue;
+
+                el.value = nota;
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                return true;
+            }
+            return false;
+        }
+        """
+
+        try:
+                return bool(scope.evaluate(js, {"suffix": suffix, "nota": nota_texto}))
+        except Exception:  # noqa: BLE001
+                return False
+
+
+def _is_any_numeric_input_for_suffix_already_set(scope, suffix: str, nota_texto: str) -> bool:
+        js = """
+        ({ suffix }) => {
+            const out = [];
+            const candidates = Array.from(document.querySelectorAll('input[type="text"], input[type="number"]'));
+            for (const el of candidates) {
+                const name = (el.getAttribute('name') || '').trim();
+                const id = (el.getAttribute('id') || '').trim();
+                const attrs = `${name} ${id}`;
+                if (!attrs.includes(`_${suffix}`)) continue;
+                out.push((el.value || '').trim());
+            }
+            return out;
+        }
+        """
+
+        try:
+                values = scope.evaluate(js, {"suffix": suffix})
+        except Exception:  # noqa: BLE001
+                return False
+
+        if not isinstance(values, list):
+                return False
+
+        for raw in values:
+                if _grade_value_matches_target(str(raw or ""), nota_texto):
+                        return True
+        return False
+
+
+def _grade_value_matches_target(raw_value: str, nota_texto: str) -> bool:
+    atual = (raw_value or "").strip().replace(" ", "")
+    alvo = (nota_texto or "").strip().replace(" ", "")
+    if not atual or not alvo:
+        return False
+    if atual == alvo:
+        return True
+
+    atual_norm = atual.replace(",", ".")
+    alvo_norm = alvo.replace(",", ".")
+    try:
+        return abs(float(atual_norm) - float(alvo_norm)) < 1e-9
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _is_grade_already_set_for_suffix(scope, suffix: str, nota_texto: str) -> bool:
+    selectors = [
+        f"input[name='_NOTA_{suffix}']",
+        f"input[id='_NOTA_{suffix}']",
+        f"input[name$='_{suffix}'][name*='NOTA' i]",
+        f"input[id$='_{suffix}'][id*='NOTA' i]",
+        f"input[name$='_{suffix}'][name*='AVAL' i]",
+        f"input[id$='_{suffix}'][id*='AVAL' i]",
+    ]
+
+    for sel in selectors:
+        try:
+            fields = scope.locator(sel)
+            total = min(fields.count(), 6)
+            for idx in range(total):
+                node = fields.nth(idx)
+                try:
+                    current_value = node.input_value(timeout=350)
+                except Exception:  # noqa: BLE001
+                    current_value = ""
+                if _grade_value_matches_target(current_value, nota_texto):
+                    return True
+        except Exception:  # noqa: BLE001
+            continue
+
+    return False
+
+
 def _try_fill_grade_for_student_on_current_page(page, aluno: str, nota_texto: str) -> bool:
     if not _normalize_loose(aluno):
         return False
 
     for scope in _iter_scopes(page):
-        slots = _collect_student_slots(scope)
+        slots = _wait_student_slots(scope)
         if not slots:
             continue
 
+        for suffix in _candidate_suffixes_for_student(aluno, slots):
+            if _try_fill_grade_by_suffix(scope, suffix, nota_texto):
+                return True
+            if _is_grade_already_set_for_suffix(scope, suffix, nota_texto):
+                return True
+            if _try_fill_any_numeric_input_for_suffix(scope, suffix, nota_texto):
+                return True
+            if _is_any_numeric_input_for_suffix_already_set(scope, suffix, nota_texto):
+                return True
+
+        # Compatibilidade com estrategia anterior: tenta melhor slot unico.
         slot = _pick_best_student_slot(aluno, slots)
         if slot and _try_fill_grade_by_suffix(scope, str(slot.get("suffix", "")), nota_texto):
+            return True
+        if slot and _is_grade_already_set_for_suffix(scope, str(slot.get("suffix", "")), nota_texto):
+            return True
+        if slot and _try_fill_any_numeric_input_for_suffix(scope, str(slot.get("suffix", "")), nota_texto):
+            return True
+        if slot and _is_any_numeric_input_for_suffix_already_set(scope, str(slot.get("suffix", "")), nota_texto):
             return True
 
         suffix = _find_student_suffix_by_html(scope, aluno)
         if suffix and _try_fill_grade_by_suffix(scope, suffix, nota_texto):
+            return True
+        if suffix and _is_grade_already_set_for_suffix(scope, suffix, nota_texto):
             return True
 
     return False
@@ -1842,6 +2130,12 @@ def _fill_grade_for_student(page, aluno: str, nota: float, logger: Optional[LogF
         cell.fill(nota_texto, timeout=ACTION_TIMEOUT_MS)
         return True
     except Exception as exc:  # noqa: BLE001
+        try:
+            current_value = cell.input_value(timeout=350)
+        except Exception:  # noqa: BLE001
+            current_value = ""
+        if _grade_value_matches_target(current_value, nota_texto):
+            return True
         _log(logger, f"Erro ao preencher nota de {aluno}: {exc}")
         return False
 
@@ -2001,6 +2295,7 @@ def executar_lancamento(
     logger: Optional[LogFn] = print,
     dry_run: bool = False,
 ) -> Dict[str, int]:
+    _log(logger, f"Runtime ref/sha: {os.environ.get('GITHUB_REF_NAME', 'local')} / {os.environ.get('GITHUB_SHA', 'local')[:7]}")
     cpf = _resolve_env_credential(SGE_CPF, "SGE_CPF", logger=logger, digits_only=True)
     cpf = _normalize_cpf_for_sge(cpf, logger=logger)
     senha = _resolve_env_credential(SGE_SENHA, "SGE_SENHA", logger=logger, digits_only=False)
@@ -2010,7 +2305,7 @@ def executar_lancamento(
     if _is_placeholder_env(cpf) or _is_placeholder_env(senha):
         raise LancamentoError("SGE_CPF/SGE_SENHA estao com placeholders. Atualize com valores reais.")
 
-    registros = carregar_notas_notion(logger=logger)
+    registros = carregar_notas_notion(logger=logger, filtro=filtro)
     registros = _filtrar_registros(registros, filtro)
 
     if not registros:

@@ -1,0 +1,171 @@
+name: Plano de Aula - Sequência Didática
+
+on:
+  workflow_dispatch:
+    inputs:
+      arquivo_6_ano:
+        description: Nome do arquivo PDF para 6º ano (somente nome)
+        required: false
+        default: ""
+        type: string
+      arquivo_7_ano:
+        description: Nome do arquivo PDF para 7º ano (somente nome)
+        required: false
+        default: ""
+        type: string
+      arquivo_8_ano:
+        description: Nome do arquivo PDF para 8º ano (somente nome)
+        required: false
+        default: ""
+        type: string
+      arquivo_9_ano:
+        description: Nome do arquivo PDF para 9º ano (somente nome)
+        required: false
+        default: ""
+        type: string
+      data_inicio:
+        description: Data de início para criação no SGE (YYYY-MM-DD)
+        required: true
+        type: string
+      data_fim:
+        description: Data de fim para criação no SGE (YYYY-MM-DD)
+        required: true
+        type: string
+      escola:
+        description: Escola alvo (opcional)
+        required: false
+        default: "Todas"
+        type: choice
+        options:
+          - "Todas"
+          - "Juvenal"
+          - "Arapongas"
+          - "Mulde"
+          - "Anna Alves"
+          - "Tancredo"
+          - "Maria Helena"
+      modo_execucao:
+        description: Estratégia de execução planejada
+        required: true
+        default: "por_escola"
+        type: choice
+        options:
+          - "por_escola"
+          - "por_turma_em_todas_as_escolas"
+      dry_run:
+        description: Executa apenas validações (sem lançamento no SGE)
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+jobs:
+  executar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependencias
+        run: python -m pip install -r requirements.txt
+
+      - name: Ensure Playwright package
+        run: python -m pip install playwright
+
+      - name: Install Playwright browser
+        run: python -m playwright install chromium
+
+      - name: Validar parâmetros obrigatórios
+        shell: bash
+        env:
+          DATA_INICIO: ${{ github.event.inputs.data_inicio }}
+          DATA_FIM: ${{ github.event.inputs.data_fim }}
+          ARQ_6: ${{ github.event.inputs.arquivo_6_ano }}
+          ARQ_7: ${{ github.event.inputs.arquivo_7_ano }}
+          ARQ_8: ${{ github.event.inputs.arquivo_8_ano }}
+          ARQ_9: ${{ github.event.inputs.arquivo_9_ano }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$DATA_INICIO" || -z "$DATA_FIM" ]]; then
+            echo "Erro: data_inicio e data_fim são obrigatórias."
+            exit 1
+          fi
+
+          if [[ -z "$ARQ_6" && -z "$ARQ_7" && -z "$ARQ_8" && -z "$ARQ_9" ]]; then
+            echo "Erro: informe ao menos um nome de arquivo (6º, 7º, 8º ou 9º ano)."
+            exit 1
+          fi
+
+      - name: Validar secrets obrigatorios
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          ROOT_PAGE_ID: ${{ secrets.ROOT_PAGE_ID }}
+          SGE_CPF: ${{ secrets.SGE_CPF }}
+          SGE_SENHA: ${{ secrets.SGE_SENHA }}
+        run: |
+          MISSING=""
+          if [ -z "$NOTION_TOKEN" ]; then MISSING="$MISSING NOTION_TOKEN"; fi
+          if [ -z "$ROOT_PAGE_ID" ]; then MISSING="$MISSING ROOT_PAGE_ID"; fi
+          if [ -z "$SGE_CPF" ]; then MISSING="$MISSING SGE_CPF"; fi
+          if [ -z "$SGE_SENHA" ]; then MISSING="$MISSING SGE_SENHA"; fi
+
+          if [ -n "$MISSING" ]; then
+            echo "Error: missing required secrets:$MISSING"
+            exit 1
+          fi
+
+      - name: Executar lancamento de sequencia didatica
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          ROOT_PAGE_ID: ${{ secrets.ROOT_PAGE_ID }}
+          SGE_CPF: ${{ secrets.SGE_CPF }}
+          SGE_SENHA: ${{ secrets.SGE_SENHA }}
+          SGE_LOGIN_URL: ${{ secrets.SGE_LOGIN_URL }}
+          HEADLESS: "1"
+          SGE_DEBUG_LOGIN: "1"
+          SGE_DEBUG_DIR: artifacts/sge-plano-aula
+          INPUT_ESCOLA: ${{ github.event.inputs.escola }}
+          INPUT_MODO: ${{ github.event.inputs.modo_execucao }}
+          INPUT_DRY_RUN: ${{ github.event.inputs.dry_run }}
+          INPUT_DATA_INICIO: ${{ github.event.inputs.data_inicio }}
+          INPUT_DATA_FIM: ${{ github.event.inputs.data_fim }}
+          INPUT_ARQ_6: ${{ github.event.inputs.arquivo_6_ano }}
+          INPUT_ARQ_7: ${{ github.event.inputs.arquivo_7_ano }}
+          INPUT_ARQ_8: ${{ github.event.inputs.arquivo_8_ano }}
+          INPUT_ARQ_9: ${{ github.event.inputs.arquivo_9_ano }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ARGS=("lancar_sequencia_didatica_sge.py")
+
+          if [[ -n "$INPUT_ESCOLA" && "$INPUT_ESCOLA" != "Todas" ]]; then ARGS+=("--escola" "$INPUT_ESCOLA"); fi
+          if [[ -n "$INPUT_MODO" ]]; then ARGS+=("--modo-execucao" "$INPUT_MODO"); fi
+          if [[ -n "$INPUT_DATA_INICIO" ]]; then ARGS+=("--data-inicio" "$INPUT_DATA_INICIO"); fi
+          if [[ -n "$INPUT_DATA_FIM" ]]; then ARGS+=("--data-fim" "$INPUT_DATA_FIM"); fi
+          if [[ -n "$INPUT_ARQ_6" ]]; then ARGS+=("--arquivo-6-ano" "$INPUT_ARQ_6"); fi
+          if [[ -n "$INPUT_ARQ_7" ]]; then ARGS+=("--arquivo-7-ano" "$INPUT_ARQ_7"); fi
+          if [[ -n "$INPUT_ARQ_8" ]]; then ARGS+=("--arquivo-8-ano" "$INPUT_ARQ_8"); fi
+          if [[ -n "$INPUT_ARQ_9" ]]; then ARGS+=("--arquivo-9-ano" "$INPUT_ARQ_9"); fi
+          if [[ "$INPUT_DRY_RUN" == "true" ]]; then ARGS+=("--dry-run"); fi
+
+          echo "Executando python ${ARGS[*]}"
+          python "${ARGS[@]}"
+
+      - name: Upload debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sge-plano-aula-debug-${{ github.run_id }}
+          path: artifacts/sge-plano-aula/
+          if-no-files-found: ignore

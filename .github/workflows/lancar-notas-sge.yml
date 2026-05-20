@@ -107,6 +107,12 @@ jobs:
       - name: Install Playwright browser
         run: python -m playwright install chromium
 
+      - name: Show workflow ref
+        run: |
+          echo "github.ref: ${{ github.ref }}"
+          echo "github.ref_name: ${{ github.ref_name }}"
+          echo "github.sha: ${{ github.sha }}"
+
       - name: Run launcher
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
