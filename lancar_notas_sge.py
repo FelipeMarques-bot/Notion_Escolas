@@ -1928,6 +1928,69 @@ def _try_fill_grade_by_suffix(scope, suffix: str, nota_texto: str) -> bool:
         return False
 
 
+def _try_fill_any_numeric_input_for_suffix(scope, suffix: str, nota_texto: str) -> bool:
+        # Fallback amplo: alguns layouts do SGE nao usam prefixo NOTA/AVAL no campo.
+        js = """
+        ({ suffix, nota }) => {
+            const candidates = Array.from(document.querySelectorAll('input[type="text"], input[type="number"]'));
+            const isVisible = (el) => {
+                const st = window.getComputedStyle(el);
+                return st && st.visibility !== 'hidden' && st.display !== 'none';
+            };
+
+            for (const el of candidates) {
+                const name = (el.getAttribute('name') || '').trim();
+                const id = (el.getAttribute('id') || '').trim();
+                const attrs = `${name} ${id}`;
+                if (!attrs.includes(`_${suffix}`)) continue;
+                if (el.disabled || el.readOnly) continue;
+                if (!isVisible(el)) continue;
+
+                el.value = nota;
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                return true;
+            }
+            return false;
+        }
+        """
+
+        try:
+                return bool(scope.evaluate(js, {"suffix": suffix, "nota": nota_texto}))
+        except Exception:  # noqa: BLE001
+                return False
+
+
+def _is_any_numeric_input_for_suffix_already_set(scope, suffix: str, nota_texto: str) -> bool:
+        js = """
+        ({ suffix }) => {
+            const out = [];
+            const candidates = Array.from(document.querySelectorAll('input[type="text"], input[type="number"]'));
+            for (const el of candidates) {
+                const name = (el.getAttribute('name') || '').trim();
+                const id = (el.getAttribute('id') || '').trim();
+                const attrs = `${name} ${id}`;
+                if (!attrs.includes(`_${suffix}`)) continue;
+                out.push((el.value || '').trim());
+            }
+            return out;
+        }
+        """
+
+        try:
+                values = scope.evaluate(js, {"suffix": suffix})
+        except Exception:  # noqa: BLE001
+                return False
+
+        if not isinstance(values, list):
+                return False
+
+        for raw in values:
+                if _grade_value_matches_target(str(raw or ""), nota_texto):
+                        return True
+        return False
+
+
 def _grade_value_matches_target(raw_value: str, nota_texto: str) -> bool:
     atual = (raw_value or "").strip().replace(" ", "")
     alvo = (nota_texto or "").strip().replace(" ", "")
@@ -1986,12 +2049,20 @@ def _try_fill_grade_for_student_on_current_page(page, aluno: str, nota_texto: st
                 return True
             if _is_grade_already_set_for_suffix(scope, suffix, nota_texto):
                 return True
+            if _try_fill_any_numeric_input_for_suffix(scope, suffix, nota_texto):
+                return True
+            if _is_any_numeric_input_for_suffix_already_set(scope, suffix, nota_texto):
+                return True
 
         # Compatibilidade com estrategia anterior: tenta melhor slot unico.
         slot = _pick_best_student_slot(aluno, slots)
         if slot and _try_fill_grade_by_suffix(scope, str(slot.get("suffix", "")), nota_texto):
             return True
         if slot and _is_grade_already_set_for_suffix(scope, str(slot.get("suffix", "")), nota_texto):
+            return True
+        if slot and _try_fill_any_numeric_input_for_suffix(scope, str(slot.get("suffix", "")), nota_texto):
+            return True
+        if slot and _is_any_numeric_input_for_suffix_already_set(scope, str(slot.get("suffix", "")), nota_texto):
             return True
 
         suffix = _find_student_suffix_by_html(scope, aluno)
@@ -2224,6 +2295,7 @@ def executar_lancamento(
     logger: Optional[LogFn] = print,
     dry_run: bool = False,
 ) -> Dict[str, int]:
+    _log(logger, f"Runtime ref/sha: {os.environ.get('GITHUB_REF_NAME', 'local')} / {os.environ.get('GITHUB_SHA', 'local')[:7]}")
     cpf = _resolve_env_credential(SGE_CPF, "SGE_CPF", logger=logger, digits_only=True)
     cpf = _normalize_cpf_for_sge(cpf, logger=logger)
     senha = _resolve_env_credential(SGE_SENHA, "SGE_SENHA", logger=logger, digits_only=False)
