@@ -512,7 +512,7 @@ def _load_sequencias_from_notion(logger=None, ensure_status_property: bool = Tru
             response = _safe_notion_call(
                 lambda: notion.search(
                     query="Sequências Didáticas - PDFs",
-                    filter={"property": "object", "value": "database"},
+                    filter={"property": "object", "value": "data_source"},
                     start_cursor=cursor,
                     page_size=100,
                 )

@@ -999,7 +999,7 @@ def listar_contextos_disponiveis(
             response = _safe_notion_call(
                 lambda: notion.search(
                     query="Notas Escolas",
-                    filter={"property": "object", "value": "database"},
+                    filter={"property": "object", "value": "data_source"},
                     start_cursor=cursor,
                     page_size=100,
                 )
