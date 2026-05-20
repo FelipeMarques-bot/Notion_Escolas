@@ -495,7 +495,7 @@ def _is_active_row(props: Dict) -> bool:
     return True
 
 
-def _load_sequencias_from_notion(logger=None) -> List[SequenciaRegistro]:
+def _load_sequencias_from_notion(logger=None, ensure_status_property: bool = True) -> List[SequenciaRegistro]:
     root_page_id = _normalize_notion_id(ROOT_PAGE_ID)
 
     if not NOTION_TOKEN or not root_page_id:
@@ -548,7 +548,8 @@ def _load_sequencias_from_notion(logger=None) -> List[SequenciaRegistro]:
     title = _database_title(db_obj)
     _log(logger, f"Database de sequencias identificada: {title}")
 
-    _ensure_status_publicacao_property(notion, alvo_id, db_obj, logger=logger)
+    if ensure_status_property:
+        _ensure_status_publicacao_property(notion, alvo_id, db_obj, logger=logger)
 
     rows = _query_database_rows(notion, alvo_id, database_obj=db_obj)
     result: List[SequenciaRegistro] = []
@@ -649,7 +650,7 @@ def _load_sequencias_from_notion(logger=None) -> List[SequenciaRegistro]:
     return result
 
 
-def _filter_contexts(contextos_raw: List[Dict[str, str]], escola: str, trimestre: str) -> List[ContextoPlano]:
+def _filter_contexts(contextos_raw: List[Dict[str, str]], escola: str, trimestre: str, turma: str = "") -> List[ContextoPlano]:
     filtered: List[ContextoPlano] = []
     for item in contextos_raw:
         ctx = ContextoPlano(
@@ -661,6 +662,8 @@ def _filter_contexts(contextos_raw: List[Dict[str, str]], escola: str, trimestre
         if escola and _normalize(ctx.escola) != _normalize(escola):
             continue
         if trimestre and _normalize(ctx.trimestre) != _normalize(trimestre):
+            continue
+        if turma and _normalize(ctx.turma) != _normalize(turma):
             continue
         filtered.append(ctx)
     return filtered
@@ -1221,9 +1224,11 @@ def _executar_fluxo_plano_aulas(page, contexto: ContextoPlano, registro: Sequenc
 
 def executar_lancamento_sequencia(
     escola: str = "",
+    turma: str = "",
     trimestre: str = "2º Trimestre",
     modo_execucao: str = "por_escola",
     dry_run: bool = False,
+    modo_rapido: bool = False,
     data_inicio: str = "",
     data_fim: str = "",
     arquivo_por_ano: Optional[Dict[str, str]] = None,
@@ -1238,17 +1243,20 @@ def executar_lancamento_sequencia(
     if _is_placeholder_env(cpf) or _is_placeholder_env(senha):
         raise LancamentoError("SGE_CPF/SGE_SENHA estao com placeholders. Atualize com valores reais.")
 
-    registros = _load_sequencias_from_notion(logger=logger)
+    registros = _load_sequencias_from_notion(logger=logger, ensure_status_property=(not modo_rapido))
     filtro_contexto: Dict[str, str] = {}
     if escola:
         filtro_contexto["escola"] = escola
     if trimestre:
         filtro_contexto["trimestre"] = trimestre
+    if turma:
+        filtro_contexto["turma"] = turma
 
     contextos = _filter_contexts(
         listar_contextos_disponiveis(logger=logger, filtro=filtro_contexto),
         escola=escola,
         trimestre=trimestre,
+        turma=turma,
     )
 
     if not contextos:
@@ -1302,12 +1310,13 @@ def executar_lancamento_sequencia(
                 continue
 
             try:
-                _atualizar_status_publicacao_notion(
-                    registro.page_id,
-                    "Em execucao",
-                    logger=logger,
-                    log_text=f"Iniciado para {ctx.escola} | {ctx.turno} | {ctx.turma} | {ctx.trimestre}",
-                )
+                if not modo_rapido:
+                    _atualizar_status_publicacao_notion(
+                        registro.page_id,
+                        "Em execucao",
+                        logger=logger,
+                        log_text=f"Iniciado para {ctx.escola} | {ctx.turno} | {ctx.turma} | {ctx.trimestre}",
+                    )
 
                 ok_plan, ok_anexo, ok_sit = _executar_fluxo_plano_aulas(
                     page,
@@ -1317,16 +1326,17 @@ def executar_lancamento_sequencia(
                     logger=logger,
                 )
 
-                status_final = "Simulado (dry run)" if dry_run else "Publicado no SGE"
-                _atualizar_status_publicacao_notion(
-                    registro.page_id,
-                    status_final,
-                    logger=logger,
-                    log_text=(
-                        f"Concluido para {ctx.escola} | {ctx.turno} | {ctx.turma} | {ctx.trimestre}. "
-                        f"planejamento={ok_plan}, anexo={ok_anexo}, situacao={ok_sit}"
-                    ),
-                )
+                if not modo_rapido:
+                    status_final = "Simulado (dry run)" if dry_run else "Publicado no SGE"
+                    _atualizar_status_publicacao_notion(
+                        registro.page_id,
+                        status_final,
+                        logger=logger,
+                        log_text=(
+                            f"Concluido para {ctx.escola} | {ctx.turno} | {ctx.turma} | {ctx.trimestre}. "
+                            f"planejamento={ok_plan}, anexo={ok_anexo}, situacao={ok_sit}"
+                        ),
+                    )
 
                 if ok_plan:
                     resumo.planejamentos_criados += 1
@@ -1337,22 +1347,24 @@ def executar_lancamento_sequencia(
             except PlaywrightTimeoutError as exc:
                 resumo.falhas += 1
                 _log(logger, f"Falha por timeout em {ctx.escola} | {ctx.turma}: {exc}")
-                _atualizar_status_publicacao_notion(
-                    registro.page_id,
-                    "Erro na publicacao",
-                    logger=logger,
-                    log_text=f"Timeout em {ctx.escola} | {ctx.turno} | {ctx.turma} | {ctx.trimestre}: {exc}",
-                )
+                if not modo_rapido:
+                    _atualizar_status_publicacao_notion(
+                        registro.page_id,
+                        "Erro na publicacao",
+                        logger=logger,
+                        log_text=f"Timeout em {ctx.escola} | {ctx.turno} | {ctx.turma} | {ctx.trimestre}: {exc}",
+                    )
                 _click_inicio(page)
             except Exception as exc:  # noqa: BLE001
                 resumo.falhas += 1
                 _log(logger, f"Falha em {ctx.escola} | {ctx.turma}: {exc}")
-                _atualizar_status_publicacao_notion(
-                    registro.page_id,
-                    "Erro na publicacao",
-                    logger=logger,
-                    log_text=f"Erro em {ctx.escola} | {ctx.turno} | {ctx.turma} | {ctx.trimestre}: {exc}",
-                )
+                if not modo_rapido:
+                    _atualizar_status_publicacao_notion(
+                        registro.page_id,
+                        "Erro na publicacao",
+                        logger=logger,
+                        log_text=f"Erro em {ctx.escola} | {ctx.turno} | {ctx.turma} | {ctx.trimestre}: {exc}",
+                    )
                 _click_inicio(page)
 
         context.close()
@@ -1364,8 +1376,10 @@ def executar_lancamento_sequencia(
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Lanca sequencia didatica (Plano de Aulas) no SGE")
     parser.add_argument("--escola", default="")
+    parser.add_argument("--turma", default="")
     parser.add_argument("--trimestre", default="2º Trimestre")
     parser.add_argument("--modo-execucao", default="por_escola", choices=["por_escola", "por_turma_em_todas_as_escolas"])
+    parser.add_argument("--modo-rapido", action="store_true")
     parser.add_argument("--data-inicio", default="")
     parser.add_argument("--data-fim", default="")
     parser.add_argument("--arquivo-6-ano", default="")
@@ -1389,9 +1403,11 @@ def main() -> int:
     try:
         resumo = executar_lancamento_sequencia(
             escola=args.escola if args.escola and _normalize(args.escola) != "todas" else "",
+            turma=args.turma,
             trimestre=args.trimestre,
             modo_execucao=args.modo_execucao,
             dry_run=args.dry_run,
+            modo_rapido=args.modo_rapido,
             data_inicio=args.data_inicio,
             data_fim=args.data_fim,
             arquivo_por_ano=arquivo_por_ano,

@@ -984,31 +984,56 @@ def listar_contextos_disponiveis(
     logger: Optional[LogFn] = None,
     filtro: Optional[Dict[str, str]] = None,
 ) -> List[Dict[str, str]]:
-    try:
-        registros = carregar_notas_notion(logger=logger, filtro=filtro)
-        contextos = {
-            (r.escola, r.turno, r.turma, r.trimestre)
-            for r in registros
-        }
-        result = [
-            {"escola": e, "turno": t, "turma": tu, "trimestre": tr}
-            for e, t, tu, tr in sorted(contextos)
-        ]
-        return result
-    except LancamentoError as exc:
-        if "Nenhuma nota valida" not in str(exc):
-            raise
-
     root_page_id = _normalize_notion_id(ROOT_PAGE_ID)
 
     if not NOTION_TOKEN or not root_page_id:
         raise LancamentoError("Defina NOTION_TOKEN e ROOT_PAGE_ID nas variaveis de ambiente.")
 
     notion = Client(auth=NOTION_TOKEN)
-    _log(logger, "Nenhuma nota valida encontrada. Listando contextos pela estrutura das databases...")
+    contextos = set()
+
+    # Caminho rapido: busca direta por databases ja compartilhadas com a integracao.
+    try:
+        cursor = None
+        while True:
+            response = _safe_notion_call(
+                lambda: notion.search(
+                    query="Notas Escolas",
+                    filter={"property": "object", "value": "database"},
+                    start_cursor=cursor,
+                    page_size=100,
+                )
+            )
+
+            for db in response.get("results", []):
+                if db.get("archived"):
+                    continue
+                title = _database_title(db)
+                if not _is_notas_database(title):
+                    continue
+
+                ctx = _infer_context([title])
+                if not _context_matches_filter(ctx, filtro):
+                    continue
+                if "nao identificado" in ctx.turno.lower() or "nao identificado" in ctx.turma.lower():
+                    continue
+                contextos.add((ctx.escola, ctx.turno, ctx.turma, ctx.trimestre))
+
+            if not response.get("has_more"):
+                break
+            cursor = response.get("next_cursor")
+    except Exception as exc:  # noqa: BLE001
+        _log(logger, f"Aviso: falha na busca rapida de contextos no Notion: {exc}")
+
+    if contextos:
+        return [
+            {"escola": e, "turno": t, "turma": tu, "trimestre": tr}
+            for e, t, tu, tr in sorted(contextos)
+        ]
+
+    _log(logger, "Listando contextos via descoberta de estrutura (fallback)...")
     databases = _discover_databases(notion, root_page_id, logger=logger)
 
-    contextos = set()
     for db_id, breadcrumb, db_title in databases:
         try:
             db_obj = _safe_notion_call(lambda: notion.databases.retrieve(database_id=db_id))

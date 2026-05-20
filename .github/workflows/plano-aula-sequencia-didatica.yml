@@ -46,6 +46,11 @@ on:
           - "Anna Alves"
           - "Tancredo"
           - "Maria Helena"
+      turma:
+        description: "Turma alvo exata (opcional, ex.: 6º Ano 1)"
+        required: false
+        default: ""
+        type: string
       modo_execucao:
         description: Tipo de lancamento (como aplicar os planos)
         required: true
@@ -54,6 +59,14 @@ on:
         options:
           - "Por escola (todas as turmas da escola selecionada)"
           - "Por turma em todas as escolas (6º em todas, depois 7º, etc.)"
+      modo_rapido:
+        description: Modo rapido (reduz chamadas extras ao Notion durante o lancamento)
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
       dry_run:
         description: Executa apenas validações (sem lançamento no SGE)
         required: true
@@ -144,7 +157,9 @@ jobs:
           SGE_DEBUG_DIR: artifacts/sge-plano-aula
           NOTION_CLIENT_LOG_LEVEL: CRITICAL
           INPUT_ESCOLA: ${{ github.event.inputs.escola }}
+          INPUT_TURMA: ${{ github.event.inputs.turma }}
           INPUT_MODO: ${{ github.event.inputs.modo_execucao }}
+          INPUT_MODO_RAPIDO: ${{ github.event.inputs.modo_rapido }}
           INPUT_DRY_RUN: ${{ github.event.inputs.dry_run }}
           INPUT_DATA_INICIO: ${{ github.event.inputs.data_inicio }}
           INPUT_DATA_FIM: ${{ github.event.inputs.data_fim }}
@@ -169,7 +184,9 @@ jobs:
           esac
 
           if [[ -n "$INPUT_ESCOLA" && "$INPUT_ESCOLA" != "Todas" ]]; then ARGS+=("--escola" "$INPUT_ESCOLA"); fi
+          if [[ -n "$INPUT_TURMA" ]]; then ARGS+=("--turma" "$INPUT_TURMA"); fi
           if [[ -n "$MODO_CLI" ]]; then ARGS+=("--modo-execucao" "$MODO_CLI"); fi
+          if [[ "$INPUT_MODO_RAPIDO" == "true" ]]; then ARGS+=("--modo-rapido"); fi
           if [[ -n "$INPUT_DATA_INICIO" ]]; then ARGS+=("--data-inicio" "$INPUT_DATA_INICIO"); fi
           if [[ -n "$INPUT_DATA_FIM" ]]; then ARGS+=("--data-fim" "$INPUT_DATA_FIM"); fi
           if [[ -n "$INPUT_ARQ_6" ]]; then ARGS+=("--arquivo-6-ano" "$INPUT_ARQ_6"); fi
