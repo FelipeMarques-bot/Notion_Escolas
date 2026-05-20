@@ -387,6 +387,14 @@ def _file_name_matches(wanted: str, actual: str) -> bool:
     return w == a or w in a or a in w
 
 
+def _template_matches_wanted_file(wanted: str, registro: SequenciaRegistro) -> bool:
+    if _file_name_matches(wanted, registro.arquivo_nome):
+        return True
+    if _file_name_matches(wanted, registro.titulo_documento):
+        return True
+    return False
+
+
 def _first_file_from_prop(prop: Dict) -> Tuple[str, str]:
     if prop.get("type") != "files":
         return "", ""
@@ -771,9 +779,13 @@ def _pick_template_for_context(
 
     wanted_file = (filename_by_ano.get(ano, "") or "").strip()
     if wanted_file:
-        exact_file = [r for r in candidates if _file_name_matches(wanted_file, r.arquivo_nome)]
+        exact_file = [r for r in candidates if _template_matches_wanted_file(wanted_file, r)]
         if exact_file:
             candidates = exact_file
+        elif len(candidates) == 1:
+            # Fallback pragmatico: quando ha somente um template valido para o ano,
+            # evita bloquear execucao por variacao de rotulo no nome informado.
+            pass
         else:
             return None
 
