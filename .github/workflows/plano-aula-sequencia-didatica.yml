@@ -142,6 +142,7 @@ jobs:
           HEADLESS: "1"
           SGE_DEBUG_LOGIN: "1"
           SGE_DEBUG_DIR: artifacts/sge-plano-aula
+          NOTION_CLIENT_LOG_LEVEL: CRITICAL
           INPUT_ESCOLA: ${{ github.event.inputs.escola }}
           INPUT_MODO: ${{ github.event.inputs.modo_execucao }}
           INPUT_DRY_RUN: ${{ github.event.inputs.dry_run }}

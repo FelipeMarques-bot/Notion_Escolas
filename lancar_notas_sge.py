@@ -30,6 +30,7 @@ load_dotenv(override=True)
 # Mantemos o comportamento do script e reduzimos ruido no output do workflow.
 _notion_log_level = (os.environ.get("NOTION_CLIENT_LOG_LEVEL", "ERROR") or "ERROR").upper()
 logging.getLogger("notion_client").setLevel(getattr(logging, _notion_log_level, logging.ERROR))
+logging.getLogger("notion_client.client").setLevel(getattr(logging, _notion_log_level, logging.ERROR))
 
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "")
 ROOT_PAGE_ID = os.environ.get("ROOT_PAGE_ID", "")
@@ -417,6 +418,34 @@ def _safe_notion_call(fn):
     retry = 4
     wait = 1.2
     last = None
+
+    def _is_retryable(msg: str) -> bool:
+        text = (msg or "").lower()
+        # Erros transitórios: timeout, rate limit, gateway/servidor.
+        if "requesttimeout" in text or "timed out" in text:
+            return True
+        if "rate limited" in text or "status: 429" in text:
+            return True
+        if re.search(r"status:\s*5\d\d", text):
+            return True
+
+        # Erros não transitórios: sem permissão/recurso inexistente/validação.
+        non_retryable_markers = [
+            "objectnotfound",
+            "could not find block",
+            "could not find",
+            "validation_error",
+            "forbidden",
+            "restricted_resource",
+            "unauthorized",
+            "api token is invalid",
+        ]
+        if any(marker in text for marker in non_retryable_markers):
+            return False
+
+        # Padrão conservador: não repetir se não houver indício de transiente.
+        return False
+
     for idx in range(1, retry + 1):
         try:
             return fn()
@@ -427,6 +456,8 @@ def _safe_notion_call(fn):
                     "NOTION_TOKEN invalido no ambiente de execucao. Atualize o secret NOTION_TOKEN no GitHub Actions."
                 ) from exc
             last = exc
+            if not _is_retryable(msg):
+                break
             if idx == retry:
                 break
             time.sleep(wait * idx)

@@ -504,14 +504,42 @@ def _load_sequencias_from_notion(logger=None) -> List[SequenciaRegistro]:
         raise LancamentoError("NOTION_TOKEN/ROOT_PAGE_ID estao com placeholders. Atualize com valores reais.")
 
     notion = Client(auth=NOTION_TOKEN)
-    databases = _discover_databases(notion, root_page_id, logger=logger)
 
-    alvo_id = ""
-    for db_id, _, db_title in databases:
-        title_norm = _normalize(db_title)
-        if title_norm == SEQUENCIAS_DB_TITLE or SEQUENCIAS_DB_TITLE in title_norm:
-            alvo_id = db_id
-            break
+    def _find_db_by_search() -> str:
+        # Busca direta evita varrer toda a hierarquia (mais rapido e menos sujeito a blocos inacessiveis).
+        cursor = None
+        while True:
+            response = _safe_notion_call(
+                lambda: notion.search(
+                    query="Sequências Didáticas - PDFs",
+                    filter={"property": "object", "value": "database"},
+                    start_cursor=cursor,
+                    page_size=100,
+                )
+            )
+            for db in response.get("results", []):
+                if db.get("archived"):
+                    continue
+                if _normalize(_database_title(db)) == _normalize("Sequências Didáticas - PDFs"):
+                    return (db.get("id") or "").strip()
+
+            if not response.get("has_more"):
+                break
+            cursor = response.get("next_cursor")
+        return ""
+
+    alvo_id = _find_db_by_search()
+
+    # Fallback para descoberta por arvore quando a busca direta nao localizar.
+    databases = []
+    if not alvo_id:
+        databases = _discover_databases(notion, root_page_id, logger=logger)
+
+        for db_id, _, db_title in databases:
+            title_norm = _normalize(db_title)
+            if title_norm == SEQUENCIAS_DB_TITLE or SEQUENCIAS_DB_TITLE in title_norm:
+                alvo_id = db_id
+                break
 
     if not alvo_id:
         raise LancamentoError("Database 'Sequencias Didaticas - PDFs' nao encontrada no Notion.")
