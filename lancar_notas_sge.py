@@ -807,7 +807,26 @@ def _is_probably_grade_column(col_name: str) -> bool:
     return all(word not in lowered for word in blacklist)
 
 
-def carregar_notas_notion(logger: Optional[LogFn] = None) -> List[RegistroNota]:
+def _context_matches_filter(context: ContextoTurma, filtro: Optional[Dict[str, str]]) -> bool:
+    if not filtro:
+        return True
+
+    def match(value: str, key: str) -> bool:
+        expected = (filtro.get(key) or "").strip()
+        return True if not expected else _normalize(value) == _normalize(expected)
+
+    return (
+        match(context.escola, "escola")
+        and match(context.turno, "turno")
+        and match(context.turma, "turma")
+        and match(context.trimestre, "trimestre")
+    )
+
+
+def carregar_notas_notion(
+    logger: Optional[LogFn] = None,
+    filtro: Optional[Dict[str, str]] = None,
+) -> List[RegistroNota]:
     root_page_id = _normalize_notion_id(ROOT_PAGE_ID)
 
     if not NOTION_TOKEN or not root_page_id:
@@ -835,6 +854,11 @@ def carregar_notas_notion(logger: Optional[LogFn] = None) -> List[RegistroNota]:
         title = _database_title(db_obj) or db_title
         if not _is_notas_database(title):
             continue
+
+        context = _infer_context([*breadcrumb, title])
+        if not _context_matches_filter(context, filtro):
+            continue
+
         try:
             rows = _query_database_rows(notion, db_id, database_obj=db_obj)
         except Exception as exc:  # noqa: BLE001
@@ -844,7 +868,6 @@ def carregar_notas_notion(logger: Optional[LogFn] = None) -> List[RegistroNota]:
         if not rows:
             continue
 
-        context = _infer_context([*breadcrumb, title])
         candidatos.append(
             {
                 "db_id": db_id,
@@ -1724,6 +1747,18 @@ def _go_to_next_grade_page(page) -> bool:
             "input[type='button'][value='>']",
             "button:text-is('>')",
             "a:text-is('>')",
+            "input[type='submit'][value*='Prox' i]",
+            "input[type='button'][value*='Prox' i]",
+            "input[type='submit'][name*='PROX' i]",
+            "input[type='button'][name*='PROX' i]",
+            "a[title*='Próx' i]",
+            "a[title*='Prox' i]",
+            "a[aria-label*='Próx' i]",
+            "a[aria-label*='Prox' i]",
+            "a:has-text('Próximo')",
+            "button:has-text('Próximo')",
+            "a:has-text('Seguinte')",
+            "button:has-text('Seguinte')",
         ],
     )
     if moved:
@@ -1775,6 +1810,23 @@ def _collect_student_slots(scope) -> List[Dict[str, str]]:
             return [s for s in slots if isinstance(s, dict)]
     except Exception:  # noqa: BLE001
         return []
+    return []
+
+
+def _wait_student_slots(scope, attempts: int = 6, delay_ms: int = 250) -> List[Dict[str, str]]:
+    slots = _collect_student_slots(scope)
+    if slots:
+        return slots
+
+    for _ in range(max(0, attempts - 1)):
+        try:
+            scope.wait_for_timeout(delay_ms)
+        except Exception:  # noqa: BLE001
+            pass
+        slots = _collect_student_slots(scope)
+        if slots:
+            return slots
+
     return []
 
 
@@ -1925,7 +1977,7 @@ def _try_fill_grade_for_student_on_current_page(page, aluno: str, nota_texto: st
         return False
 
     for scope in _iter_scopes(page):
-        slots = _collect_student_slots(scope)
+        slots = _wait_student_slots(scope)
         if not slots:
             continue
 
@@ -1944,6 +1996,8 @@ def _try_fill_grade_for_student_on_current_page(page, aluno: str, nota_texto: st
 
         suffix = _find_student_suffix_by_html(scope, aluno)
         if suffix and _try_fill_grade_by_suffix(scope, suffix, nota_texto):
+            return True
+        if suffix and _is_grade_already_set_for_suffix(scope, suffix, nota_texto):
             return True
 
     return False
@@ -2005,6 +2059,12 @@ def _fill_grade_for_student(page, aluno: str, nota: float, logger: Optional[LogF
         cell.fill(nota_texto, timeout=ACTION_TIMEOUT_MS)
         return True
     except Exception as exc:  # noqa: BLE001
+        try:
+            current_value = cell.input_value(timeout=350)
+        except Exception:  # noqa: BLE001
+            current_value = ""
+        if _grade_value_matches_target(current_value, nota_texto):
+            return True
         _log(logger, f"Erro ao preencher nota de {aluno}: {exc}")
         return False
 
@@ -2173,7 +2233,7 @@ def executar_lancamento(
     if _is_placeholder_env(cpf) or _is_placeholder_env(senha):
         raise LancamentoError("SGE_CPF/SGE_SENHA estao com placeholders. Atualize com valores reais.")
 
-    registros = carregar_notas_notion(logger=logger)
+    registros = carregar_notas_notion(logger=logger, filtro=filtro)
     registros = _filtrar_registros(registros, filtro)
 
     if not registros:
