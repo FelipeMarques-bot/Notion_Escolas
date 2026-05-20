@@ -87,9 +87,24 @@ class ExecucaoResumo:
     falhas: int = 0
 
 
+ESCOLA_TURNOS_PADRAO = {
+    "juvenal": ["Matutino"],
+    "arapongas": ["Vespertino"],
+    "mulde": ["Matutino"],
+    "anna alves": ["Vespertino"],
+    "tancredo": ["Matutino", "Vespertino"],
+    "maria helena": ["Matutino", "Vespertino"],
+}
+
+
 def _log(logger, msg: str) -> None:
     if logger:
         logger(msg)
+
+
+def _turnos_por_escola(escola: str) -> List[str]:
+    key = _normalize(escola)
+    return ESCOLA_TURNOS_PADRAO.get(key, [])
 
 
 def _make_rich_text(content: str) -> List[Dict]:
@@ -1273,20 +1288,34 @@ def executar_lancamento_sequencia(
         raise LancamentoError("SGE_CPF/SGE_SENHA estao com placeholders. Atualize com valores reais.")
 
     registros = _load_sequencias_from_notion(logger=logger, ensure_status_property=(not modo_rapido))
-    filtro_contexto: Dict[str, str] = {}
-    if escola:
-        filtro_contexto["escola"] = escola
-    if trimestre:
-        filtro_contexto["trimestre"] = trimestre
-    if turma:
-        filtro_contexto["turma"] = turma
 
-    contextos = _filter_contexts(
-        listar_contextos_disponiveis(logger=logger, filtro=filtro_contexto),
-        escola=escola,
-        trimestre=trimestre,
-        turma=turma,
-    )
+    contextos: List[ContextoPlano] = []
+    if modo_rapido and escola and turma:
+        turnos = _turnos_por_escola(escola)
+        if not turnos:
+            # Fallback conservador para escola fora do cadastro conhecido.
+            turnos = ["Matutino", "Vespertino"]
+
+        contextos = [
+            ContextoPlano(escola=escola, turno=turno, turma=turma, trimestre=trimestre)
+            for turno in turnos
+        ]
+        _log(logger, f"Modo rapido: usando contexto direto sem descoberta no Notion ({len(contextos)} turno(s)).")
+    else:
+        filtro_contexto: Dict[str, str] = {}
+        if escola:
+            filtro_contexto["escola"] = escola
+        if trimestre:
+            filtro_contexto["trimestre"] = trimestre
+        if turma:
+            filtro_contexto["turma"] = turma
+
+        contextos = _filter_contexts(
+            listar_contextos_disponiveis(logger=logger, filtro=filtro_contexto),
+            escola=escola,
+            trimestre=trimestre,
+            turma=turma,
+        )
 
     if not contextos:
         raise LancamentoError("Nenhum contexto de turma encontrado para executar Plano de Aulas.")
