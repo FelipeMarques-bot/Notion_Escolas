@@ -768,6 +768,17 @@ def propriedades_database_sequencia_didatica(titulo_prop="Name"):
                 ]
             },
         },
+        "Status publicacao plano SGE": {
+            "select": {
+                "options": [
+                    {"name": "Pendente", "color": "yellow"},
+                    {"name": "Em execucao", "color": "blue"},
+                    {"name": "Publicado no SGE", "color": "green"},
+                    {"name": "Simulado (dry run)", "color": "gray"},
+                    {"name": "Erro na publicacao", "color": "red"},
+                ]
+            },
+        },
         "Ultima execucao": {
             "date": {},
         },

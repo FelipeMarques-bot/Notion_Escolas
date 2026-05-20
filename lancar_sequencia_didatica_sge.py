@@ -1,8 +1,11 @@
 import argparse
+import logging
 import os
 import re
 import tempfile
 import urllib.request
+import json
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
@@ -42,6 +45,13 @@ NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "")
 ROOT_PAGE_ID = os.environ.get("ROOT_PAGE_ID", "")
 SGE_CPF = os.environ.get("SGE_CPF", "")
 SGE_SENHA = os.environ.get("SGE_SENHA", "")
+NOTION_STATUS_PUBLICACAO_PROP = os.environ.get("NOTION_STATUS_PUBLICACAO_PROP", "Status publicacao plano SGE")
+NOTION_LOG_PUBLICACAO_PROP = os.environ.get("NOTION_LOG_PUBLICACAO_PROP", "Log execucao")
+NOTION_LAST_RUN_PROP = os.environ.get("NOTION_LAST_RUN_PROP", "Ultima execucao")
+
+# Evita excesso de WARNING do SDK do Notion durante retries no CI.
+_notion_log_level = (os.environ.get("NOTION_CLIENT_LOG_LEVEL", "ERROR") or "ERROR").upper()
+logging.getLogger("notion_client").setLevel(getattr(logging, _notion_log_level, logging.ERROR))
 
 SEQUENCIAS_DB_TITLE = "sequencias didaticas - pdfs"
 
@@ -81,9 +91,67 @@ def _log(logger, msg: str) -> None:
         logger(msg)
 
 
+def _make_rich_text(content: str) -> List[Dict]:
+    text = (content or "")[:1900]
+    if not text:
+        return []
+    return [{"type": "text", "text": {"content": text}}]
+
+
+def _atualizar_status_publicacao_notion(page_id: str, status: str, logger=None, log_text: str = "") -> None:
+    pid = (page_id or "").strip()
+    if not pid or not (NOTION_TOKEN or "").strip():
+        return
+
+    try:
+        notion = Client(auth=NOTION_TOKEN)
+        page = _safe_notion_call(lambda: notion.pages.retrieve(page_id=pid))
+        props = page.get("properties", {})
+        payload: Dict[str, Dict] = {}
+
+        status_prop = props.get(NOTION_STATUS_PUBLICACAO_PROP, {})
+        if status_prop.get("type") == "select":
+            payload[NOTION_STATUS_PUBLICACAO_PROP] = {"select": {"name": status}}
+
+        run_prop = props.get(NOTION_LAST_RUN_PROP, {})
+        if run_prop.get("type") == "date":
+            payload[NOTION_LAST_RUN_PROP] = {"date": {"start": datetime.utcnow().strftime("%Y-%m-%d")}}
+
+        if log_text:
+            log_prop = props.get(NOTION_LOG_PUBLICACAO_PROP, {})
+            if log_prop.get("type") == "rich_text":
+                payload[NOTION_LOG_PUBLICACAO_PROP] = {"rich_text": _make_rich_text(log_text)}
+
+        if payload:
+            _safe_notion_call(lambda: notion.pages.update(page_id=pid, properties=payload))
+    except Exception as exc:  # noqa: BLE001
+        _log(logger, f"Aviso: falha ao atualizar status de publicacao no Notion ({pid}): {exc}")
+
+
 def _ano_from_turma(turma: str) -> str:
     m = re.search(r"([6-9])\s*[oº]?\s*ano", turma or "", flags=re.IGNORECASE)
     return f"{m.group(1)}º Ano" if m else ""
+
+
+def _normalize_ano_label(value: str) -> str:
+    text = _normalize(value or "")
+    m = re.search(r"\b([6-9])\s*o?\s*ano\b", text)
+    if m:
+        return f"{m.group(1)}º Ano"
+
+    m = re.search(r"\b([6-9])\b", text)
+    if m:
+        return f"{m.group(1)}º Ano"
+
+    return ""
+
+
+def _infer_ano_from_texts(*texts: str) -> str:
+    for text in texts:
+        ano = _normalize_ano_label(text)
+        if ano:
+            return ano
+    return ""
 
 
 def _norm_file_name(name: str) -> str:
@@ -99,12 +167,62 @@ def _fmt_date_ddmmyyyy(value: str) -> str:
     if re.fullmatch(r"\d{2}/\d{2}/\d{4}", raw):
         return raw
 
+    # dd/mm/yy
+    if re.fullmatch(r"\d{2}/\d{2}/\d{2}", raw):
+        dt = datetime.strptime(raw, "%d/%m/%y")
+        return dt.strftime("%d/%m/%Y")
+
     # yyyy-mm-dd
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
         dt = datetime.strptime(raw, "%Y-%m-%d")
         return dt.strftime("%d/%m/%Y")
 
     return raw
+
+
+def _parse_periodo_text(periodo_texto: str) -> Tuple[str, str]:
+    text = _normalize(periodo_texto or "")
+    if not text:
+        return "", ""
+
+    matches = re.findall(r"(\d{1,2}/\d{1,2}(?:/\d{2,4})?)", text)
+    if len(matches) < 2:
+        return "", ""
+
+    i = _fmt_date_ddmmyyyy(matches[0])
+    f = _fmt_date_ddmmyyyy(matches[1])
+    return i, f
+
+
+def _calc_n_aulas_from_periodo(inicio: str, fim: str) -> int:
+    try:
+        dt_i = datetime.strptime(inicio, "%d/%m/%Y")
+        dt_f = datetime.strptime(fim, "%d/%m/%Y")
+    except Exception:  # noqa: BLE001
+        return 0
+
+    if dt_f < dt_i:
+        dt_i, dt_f = dt_f, dt_i
+
+    days = (dt_f - dt_i).days + 1
+    if days <= 0:
+        return 0
+    return max(1, int(math.ceil(days / 7.0)))
+
+
+def _canon_file_name(name: str) -> str:
+    text = _normalize(name or "")
+    text = re.sub(r"\.pdf$", "", text).strip()
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
+def _file_name_matches(wanted: str, actual: str) -> bool:
+    w = _canon_file_name(wanted)
+    a = _canon_file_name(actual)
+    if not w or not a:
+        return False
+    return w == a or w in a or a in w
 
 
 def _first_file_from_prop(prop: Dict) -> Tuple[str, str]:
@@ -125,6 +243,89 @@ def _first_file_from_prop(prop: Dict) -> Tuple[str, str]:
         url = ""
 
     return name, url
+
+
+def _resolve_notion_file_upload_url(file_upload_id: str) -> str:
+    fid = (file_upload_id or "").strip()
+    if not fid:
+        return ""
+
+    token = (NOTION_TOKEN or "").strip()
+    if not token:
+        return ""
+
+    req = urllib.request.Request(
+        f"https://api.notion.com/v1/file_uploads/{fid}",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Notion-Version": "2022-06-28",
+            "Content-Type": "application/json",
+        },
+        method="GET",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:  # noqa: S310
+            payload = json.loads(resp.read().decode("utf-8", errors="ignore"))
+    except Exception:  # noqa: BLE001
+        return ""
+
+    # Tenta diferentes formatos de resposta.
+    direct = (payload.get("url") or "").strip()
+    if direct:
+        return direct
+
+    file_node = payload.get("file") or {}
+    signed = (file_node.get("url") or "").strip()
+    if signed:
+        return signed
+
+    return ""
+
+
+def _first_file_from_prop_any(props: Dict) -> Tuple[str, str]:
+    # 1) Prioridade: propriedade de arquivos.
+    file_name, file_url = _first_file_from_prop(props.get("Arquivo PDF", {}))
+    if file_url:
+        return file_name, file_url
+
+    # 2) Compatibilidade com novo tipo file_upload no Notion.
+    prop = props.get("Arquivo PDF", {})
+    if prop.get("type") == "files":
+        for item in prop.get("files", []) or []:
+            if item.get("type") != "file_upload":
+                continue
+            name = (item.get("name") or "").strip()
+            upload_id = ((item.get("file_upload") or {}).get("id") or "").strip()
+            upload_url = _resolve_notion_file_upload_url(upload_id)
+            if upload_url:
+                return name, upload_url
+
+    # 3) Fallback: URL em texto (rich_text/title) no campo Arquivo PDF.
+    text_url = _extract_plain_text(props.get("Arquivo PDF", {})).strip()
+    if text_url.startswith("http://") or text_url.startswith("https://"):
+        guessed_name = os.path.basename(text_url.split("?", 1)[0]).strip()
+        return guessed_name, text_url
+
+    # 4) Schema alternativo: primeira propriedade do tipo files com URL acessivel.
+    for prop in props.values():
+        if prop.get("type") != "files":
+            continue
+
+        alt_name, alt_url = _first_file_from_prop(prop)
+        if alt_url:
+            return alt_name, alt_url
+
+        for item in prop.get("files", []) or []:
+            if item.get("type") != "file_upload":
+                continue
+            name = (item.get("name") or "").strip()
+            upload_id = ((item.get("file_upload") or {}).get("id") or "").strip()
+            upload_url = _resolve_notion_file_upload_url(upload_id)
+            if upload_url:
+                return name, upload_url
+
+    return file_name, file_url
 
 
 def _extract_date_property(props: Dict, names: List[str]) -> str:
@@ -206,15 +407,20 @@ def _load_sequencias_from_notion(logger=None) -> List[SequenciaRegistro]:
 
     rows = _query_database_rows(notion, alvo_id, database_obj=db_obj)
     result: List[SequenciaRegistro] = []
+    skipped_inactive = 0
+    skipped_sem_ano = 0
+    skipped_sem_arquivo = 0
 
     for row in rows:
         props = row.get("properties", {})
         if not _is_active_row(props):
+            skipped_inactive += 1
             continue
 
-        ano = _extract_select_or_text(props, ["Ano"])
-        if not ano:
-            continue
+        ano_bruto = _extract_select_or_text(
+            props,
+            ["Ano", "Ano/Série", "Ano/Serie", "Série", "Serie", "Turma", "Ano Escolar"],
+        )
 
         escola = _extract_select_or_text(props, ["Escola"])
         titulo_documento = _extract_select_or_text(props, ["Titulo Documento", "Título Documento"])
@@ -228,7 +434,12 @@ def _load_sequencias_from_notion(logger=None) -> List[SequenciaRegistro]:
         if not titulo_documento:
             titulo_documento = titulo_linha
 
-        arquivo_nome, arquivo_url = _first_file_from_prop(props.get("Arquivo PDF", {}))
+        arquivo_nome, arquivo_url = _first_file_from_prop_any(props)
+
+        ano = _infer_ano_from_texts(ano_bruto, titulo_documento, titulo_linha, arquivo_nome)
+        if not ano:
+            skipped_sem_ano += 1
+            continue
 
         periodo_inicio = _extract_date_property(props, ["Periodo inicio", "Período início", "Periodo", "Período"])
         periodo_fim = _extract_date_property(props, ["Periodo fim", "Período fim", "Periodo", "Período"])
@@ -242,9 +453,25 @@ def _load_sequencias_from_notion(logger=None) -> List[SequenciaRegistro]:
                 if end:
                     periodo_fim = _fmt_date_ddmmyyyy(end)
 
-        n_aulas = _extract_number_property(props, ["N aulas", "Nº aulas", "Numero de aulas"])
+        # Compatibilidade: quando 'Período' for texto (ex.: 25/05 a 19/06).
+        if not periodo_inicio or not periodo_fim:
+            periodo_txt = _extract_select_or_text(props, ["Período", "Periodo"])
+            pi_txt, pf_txt = _parse_periodo_text(periodo_txt)
+            periodo_inicio = periodo_inicio or pi_txt
+            periodo_fim = periodo_fim or pf_txt
 
-        if not titulo_documento or not arquivo_url or not periodo_inicio or not periodo_fim or n_aulas <= 0:
+        n_aulas = _extract_number_property(props, ["N aulas", "Nº aulas", "Numero de aulas"])
+        if n_aulas <= 0 and periodo_inicio and periodo_fim:
+            n_aulas = _calc_n_aulas_from_periodo(periodo_inicio, periodo_fim)
+
+        if not titulo_documento:
+            titulo_documento = arquivo_nome or titulo_linha
+
+        # Mantem linha elegivel com o minimo necessario. Campos faltantes
+        # podem ser completados por argumentos do workflow/CLI.
+        if not arquivo_url:
+            skipped_sem_arquivo += 1
+            _log(logger, f"Aviso: linha '{titulo_linha or '(sem titulo)'}' ignorada: Arquivo PDF sem URL acessivel.")
             continue
 
         result.append(
@@ -262,7 +489,10 @@ def _load_sequencias_from_notion(logger=None) -> List[SequenciaRegistro]:
         )
 
     if not result:
-        raise LancamentoError("Nenhum registro ativo/valido encontrado na database de Sequencias Didaticas.")
+        raise LancamentoError(
+            "Nenhum registro ativo/valido encontrado na database de Sequencias Didaticas "
+            f"(total={len(rows)}, inativos={skipped_inactive}, sem_ano={skipped_sem_ano}, sem_arquivo={skipped_sem_arquivo})."
+        )
 
     _log(logger, f"Registros de sequencia carregados do Notion: {len(result)}")
     return result
@@ -309,25 +539,31 @@ def _pick_template_for_context(
         if without_school:
             candidates = without_school
 
-    wanted_file = _norm_file_name(filename_by_ano.get(ano, ""))
+    wanted_file = (filename_by_ano.get(ano, "") or "").strip()
     if wanted_file:
-        exact_file = [r for r in candidates if _norm_file_name(r.arquivo_nome) == wanted_file]
+        exact_file = [r for r in candidates if _file_name_matches(wanted_file, r.arquivo_nome)]
         if exact_file:
             candidates = exact_file
         else:
             return None
 
     chosen = candidates[0]
+    final_inicio = _fmt_date_ddmmyyyy(override_inicio) or chosen.periodo_inicio
+    final_fim = _fmt_date_ddmmyyyy(override_fim) or chosen.periodo_fim
+    final_n_aulas = chosen.n_aulas
+    if final_n_aulas <= 0:
+        final_n_aulas = _calc_n_aulas_from_periodo(final_inicio, final_fim)
+
     return SequenciaRegistro(
         page_id=chosen.page_id,
         ano=chosen.ano,
         escola=chosen.escola,
-        titulo_documento=chosen.titulo_documento,
+        titulo_documento=chosen.titulo_documento or chosen.arquivo_nome,
         arquivo_nome=chosen.arquivo_nome,
         arquivo_url=chosen.arquivo_url,
-        periodo_inicio=override_inicio or chosen.periodo_inicio,
-        periodo_fim=override_fim or chosen.periodo_fim,
-        n_aulas=chosen.n_aulas,
+        periodo_inicio=final_inicio,
+        periodo_fim=final_fim,
+        n_aulas=final_n_aulas,
     )
 
 
@@ -888,7 +1124,30 @@ def executar_lancamento_sequencia(
                 resumo.falhas += 1
                 continue
 
+            if not registro.periodo_inicio or not registro.periodo_fim:
+                _log(
+                    logger,
+                    f"Falha em {ctx.escola} | {ctx.turma}: periodo ausente (preencha no Notion ou envie --data-inicio/--data-fim).",
+                )
+                resumo.falhas += 1
+                continue
+
+            if registro.n_aulas <= 0:
+                _log(
+                    logger,
+                    f"Falha em {ctx.escola} | {ctx.turma}: N aulas invalido (preencha no Notion).",
+                )
+                resumo.falhas += 1
+                continue
+
             try:
+                _atualizar_status_publicacao_notion(
+                    registro.page_id,
+                    "Em execucao",
+                    logger=logger,
+                    log_text=f"Iniciado para {ctx.escola} | {ctx.turno} | {ctx.turma} | {ctx.trimestre}",
+                )
+
                 ok_plan, ok_anexo, ok_sit = _executar_fluxo_plano_aulas(
                     page,
                     contexto=ctx,
@@ -896,6 +1155,18 @@ def executar_lancamento_sequencia(
                     dry_run=dry_run,
                     logger=logger,
                 )
+
+                status_final = "Simulado (dry run)" if dry_run else "Publicado no SGE"
+                _atualizar_status_publicacao_notion(
+                    registro.page_id,
+                    status_final,
+                    logger=logger,
+                    log_text=(
+                        f"Concluido para {ctx.escola} | {ctx.turno} | {ctx.turma} | {ctx.trimestre}. "
+                        f"planejamento={ok_plan}, anexo={ok_anexo}, situacao={ok_sit}"
+                    ),
+                )
+
                 if ok_plan:
                     resumo.planejamentos_criados += 1
                 if ok_anexo:
@@ -905,10 +1176,22 @@ def executar_lancamento_sequencia(
             except PlaywrightTimeoutError as exc:
                 resumo.falhas += 1
                 _log(logger, f"Falha por timeout em {ctx.escola} | {ctx.turma}: {exc}")
+                _atualizar_status_publicacao_notion(
+                    registro.page_id,
+                    "Erro na publicacao",
+                    logger=logger,
+                    log_text=f"Timeout em {ctx.escola} | {ctx.turno} | {ctx.turma} | {ctx.trimestre}: {exc}",
+                )
                 _click_inicio(page)
             except Exception as exc:  # noqa: BLE001
                 resumo.falhas += 1
                 _log(logger, f"Falha em {ctx.escola} | {ctx.turma}: {exc}")
+                _atualizar_status_publicacao_notion(
+                    registro.page_id,
+                    "Erro na publicacao",
+                    logger=logger,
+                    log_text=f"Erro em {ctx.escola} | {ctx.turno} | {ctx.turma} | {ctx.trimestre}: {exc}",
+                )
                 _click_inicio(page)
 
         context.close()

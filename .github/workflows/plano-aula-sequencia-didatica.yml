@@ -4,32 +4,34 @@ on:
   workflow_dispatch:
     inputs:
       arquivo_6_ano:
-        description: Nome do arquivo PDF para 6º ano (somente nome)
+        description: Arquivo do 6º ano (somente nome). Preencha apenas os anos que deseja lancar.
         required: false
         default: ""
         type: string
       arquivo_7_ano:
-        description: Nome do arquivo PDF para 7º ano (somente nome)
+        description: Arquivo do 7º ano (somente nome). Preencha apenas os anos que deseja lancar.
         required: false
         default: ""
         type: string
       arquivo_8_ano:
-        description: Nome do arquivo PDF para 8º ano (somente nome)
+        description: Arquivo do 8º ano (somente nome). Preencha apenas os anos que deseja lancar.
         required: false
         default: ""
         type: string
       arquivo_9_ano:
-        description: Nome do arquivo PDF para 9º ano (somente nome)
+        description: Arquivo do 9º ano (somente nome). Preencha apenas os anos que deseja lancar.
         required: false
         default: ""
         type: string
       data_inicio:
-        description: Data de início para criação no SGE (YYYY-MM-DD)
-        required: true
+        description: Data de início para criação no SGE (opcional; se vazio usa o Notion)
+        required: false
+        default: ""
         type: string
       data_fim:
-        description: Data de fim para criação no SGE (YYYY-MM-DD)
-        required: true
+        description: Data de fim para criação no SGE (opcional; se vazio usa o Notion)
+        required: false
+        default: ""
         type: string
       escola:
         description: Escola alvo (opcional)
@@ -45,13 +47,13 @@ on:
           - "Tancredo"
           - "Maria Helena"
       modo_execucao:
-        description: Estratégia de execução planejada
+        description: Tipo de lancamento (como aplicar os planos)
         required: true
-        default: "por_escola"
+        default: "Por escola (todas as turmas da escola selecionada)"
         type: choice
         options:
-          - "por_escola"
-          - "por_turma_em_todas_as_escolas"
+          - "Por escola (todas as turmas da escola selecionada)"
+          - "Por turma em todas as escolas (6º em todas, depois 7º, etc.)"
       dry_run:
         description: Executa apenas validações (sem lançamento no SGE)
         required: true
@@ -96,8 +98,14 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [[ -z "$DATA_INICIO" || -z "$DATA_FIM" ]]; then
-            echo "Erro: data_inicio e data_fim são obrigatórias."
+          # Datas são opcionais: quando vazias, o script usa o período cadastrado no Notion.
+          if [[ -n "$DATA_INICIO" && -z "$DATA_FIM" ]]; then
+            echo "Erro: informe data_fim junto com data_inicio (ou deixe ambas vazias para usar Notion)."
+            exit 1
+          fi
+
+          if [[ -z "$DATA_INICIO" && -n "$DATA_FIM" ]]; then
+            echo "Erro: informe data_inicio junto com data_fim (ou deixe ambas vazias para usar Notion)."
             exit 1
           fi
 
@@ -149,8 +157,18 @@ jobs:
 
           ARGS=("lancar_sequencia_didatica_sge.py")
 
+          MODO_CLI="$INPUT_MODO"
+          case "$INPUT_MODO" in
+            "Por escola (todas as turmas da escola selecionada)")
+              MODO_CLI="por_escola"
+              ;;
+            "Por turma em todas as escolas (6º em todas, depois 7º, etc.)")
+              MODO_CLI="por_turma_em_todas_as_escolas"
+              ;;
+          esac
+
           if [[ -n "$INPUT_ESCOLA" && "$INPUT_ESCOLA" != "Todas" ]]; then ARGS+=("--escola" "$INPUT_ESCOLA"); fi
-          if [[ -n "$INPUT_MODO" ]]; then ARGS+=("--modo-execucao" "$INPUT_MODO"); fi
+          if [[ -n "$MODO_CLI" ]]; then ARGS+=("--modo-execucao" "$MODO_CLI"); fi
           if [[ -n "$INPUT_DATA_INICIO" ]]; then ARGS+=("--data-inicio" "$INPUT_DATA_INICIO"); fi
           if [[ -n "$INPUT_DATA_FIM" ]]; then ARGS+=("--data-fim" "$INPUT_DATA_FIM"); fi
           if [[ -n "$INPUT_ARQ_6" ]]; then ARGS+=("--arquivo-6-ano" "$INPUT_ARQ_6"); fi
