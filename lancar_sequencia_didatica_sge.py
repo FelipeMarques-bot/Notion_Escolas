@@ -768,6 +768,8 @@ def _pick_template_for_context(
     if not candidates:
         return None
 
+    candidates_by_ano = list(candidates)
+
     # Prioriza linha da escola quando preenchida na database.
     with_school = [r for r in candidates if r.escola and _normalize(r.escola) == _normalize(contexto.escola)]
     if with_school:
@@ -782,12 +784,18 @@ def _pick_template_for_context(
         exact_file = [r for r in candidates if _template_matches_wanted_file(wanted_file, r)]
         if exact_file:
             candidates = exact_file
-        elif len(candidates) == 1:
-            # Fallback pragmatico: quando ha somente um template valido para o ano,
-            # evita bloquear execucao por variacao de rotulo no nome informado.
-            pass
         else:
-            return None
+            # Se o filtro por escola restringiu demais, tenta casar o arquivo
+            # em todos os templates do mesmo ano antes de desistir.
+            exact_file_any_school = [r for r in candidates_by_ano if _template_matches_wanted_file(wanted_file, r)]
+            if exact_file_any_school:
+                candidates = exact_file_any_school
+            elif len(candidates) == 1:
+                # Fallback pragmatico: quando ha somente um template valido para o ano,
+                # evita bloquear execucao por variacao de rotulo no nome informado.
+                pass
+            else:
+                return None
 
     chosen = candidates[0]
     final_inicio = _fmt_date_ddmmyyyy(override_inicio) or chosen.periodo_inicio
