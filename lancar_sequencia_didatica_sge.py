@@ -52,6 +52,7 @@ NOTION_LAST_RUN_PROP = os.environ.get("NOTION_LAST_RUN_PROP", "Ultima execucao")
 # Evita excesso de WARNING do SDK do Notion durante retries no CI.
 _notion_log_level = (os.environ.get("NOTION_CLIENT_LOG_LEVEL", "ERROR") or "ERROR").upper()
 logging.getLogger("notion_client").setLevel(getattr(logging, _notion_log_level, logging.ERROR))
+logging.getLogger("notion_client.client").setLevel(getattr(logging, _notion_log_level, logging.ERROR))
 
 SEQUENCIAS_DB_TITLE = "sequencias didaticas - pdfs"
 
@@ -154,6 +155,16 @@ def _extract_data_source_id_from_db(database_obj: Optional[Dict]) -> str:
     return ""
 
 
+def _database_has_property(database_obj: Optional[Dict], prop_name: str) -> bool:
+    props = (database_obj or {}).get("properties", {}) or {}
+    return prop_name in props
+
+
+def _data_source_has_property(data_source_obj: Optional[Dict], prop_name: str) -> bool:
+    props = (data_source_obj or {}).get("properties", {}) or {}
+    return prop_name in props
+
+
 def _ensure_status_publicacao_property(
     notion: Client,
     database_id: str,
@@ -164,13 +175,14 @@ def _ensure_status_publicacao_property(
     if not prop_name:
         return
 
-    props = (database_obj or {}).get("properties", {}) or {}
-    if prop_name in props:
+    if _database_has_property(database_obj, prop_name):
         return
 
     prop_def = _status_publicacao_select_def()
 
-    # Notion classico: atualiza direto na database.
+    db_update_ok = False
+
+    # Notion classico: tenta atualizar direto na database.
     try:
         _safe_notion_call(
             lambda: notion.databases.update(
@@ -178,10 +190,15 @@ def _ensure_status_publicacao_property(
                 properties={prop_name: prop_def},
             )
         )
-        _log(logger, f"Coluna '{prop_name}' criada/garantida na database de sequencias.")
-        return
+        db_after = _safe_notion_call(lambda: notion.databases.retrieve(database_id=database_id))
+        db_update_ok = _database_has_property(db_after, prop_name)
+        if db_update_ok:
+            _log(logger, f"Coluna '{prop_name}' criada/garantida na database de sequencias.")
     except Exception as exc_db:  # noqa: BLE001
         _log(logger, f"Aviso: nao foi possivel criar coluna via databases.update: {exc_db}")
+
+    if db_update_ok:
+        return
 
     # Notion data_sources: atualiza no data source vinculado.
     if not (hasattr(notion, "data_sources") and hasattr(notion.data_sources, "update")):
@@ -210,9 +227,20 @@ def _ensure_status_publicacao_property(
                 properties={prop_name: prop_def},
             )
         )
-        _log(logger, f"Coluna '{prop_name}' criada/garantida no data source da database de sequencias.")
+        ds_after = _safe_notion_call(lambda: notion.data_sources.retrieve(data_source_id=ds_id))
+        if _data_source_has_property(ds_after, prop_name):
+            _log(logger, f"Coluna '{prop_name}' criada/garantida no data source da database de sequencias.")
+            return
     except Exception as exc_ds:  # noqa: BLE001
         _log(logger, f"Aviso: falha ao garantir coluna '{prop_name}' no data source: {exc_ds}")
+
+    _log(
+        logger,
+        (
+            f"Aviso: nao foi possivel confirmar a criacao da coluna '{prop_name}' no Notion. "
+            "Verifique se a integracao tem permissao de edicao na database e se a coluna nao esta oculta na view."
+        ),
+    )
 
 
 def _ano_from_turma(turma: str) -> str:
@@ -575,6 +603,12 @@ def _load_sequencias_from_notion(logger=None) -> List[SequenciaRegistro]:
                 periodo_fim=periodo_fim,
                 n_aulas=n_aulas,
             )
+        )
+
+    if not result and len(rows) > 0 and skipped_inactive == len(rows):
+        raise LancamentoError(
+            "Nenhum registro elegivel: todos os registros estao com 'Ativo' desmarcado na database de Sequencias Didaticas. "
+            "Marque ao menos um registro como Ativo para executar o lancamento."
         )
 
     if not result:
