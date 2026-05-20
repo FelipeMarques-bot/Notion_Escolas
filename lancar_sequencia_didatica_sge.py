@@ -505,6 +505,33 @@ def _load_sequencias_from_notion(logger=None, ensure_status_property: bool = Tru
 
     notion = Client(auth=NOTION_TOKEN)
 
+    def _database_id_from_search_result(item: Dict) -> str:
+        obj_type = (item.get("object") or "").strip()
+        if obj_type == "database":
+            return (item.get("id") or "").strip()
+
+        if obj_type != "data_source":
+            return ""
+
+        parent = item.get("parent") or {}
+        if parent.get("type") == "database_id":
+            return (parent.get("database_id") or "").strip()
+
+        # Fallback: consulta detalhes do data source para descobrir a database pai.
+        ds_id = (item.get("id") or "").strip()
+        if not ds_id or not (hasattr(notion, "data_sources") and hasattr(notion.data_sources, "retrieve")):
+            return ""
+
+        try:
+            ds_obj = _safe_notion_call(lambda: notion.data_sources.retrieve(data_source_id=ds_id))
+        except Exception:  # noqa: BLE001
+            return ""
+
+        ds_parent = ds_obj.get("parent") or {}
+        if ds_parent.get("type") == "database_id":
+            return (ds_parent.get("database_id") or "").strip()
+        return ""
+
     def _find_db_by_search() -> str:
         # Busca direta evita varrer toda a hierarquia (mais rapido e menos sujeito a blocos inacessiveis).
         cursor = None
@@ -521,7 +548,9 @@ def _load_sequencias_from_notion(logger=None, ensure_status_property: bool = Tru
                 if db.get("archived"):
                     continue
                 if _normalize(_database_title(db)) == _normalize("Sequências Didáticas - PDFs"):
-                    return (db.get("id") or "").strip()
+                    db_id = _database_id_from_search_result(db)
+                    if db_id:
+                        return db_id
 
             if not response.get("has_more"):
                 break
