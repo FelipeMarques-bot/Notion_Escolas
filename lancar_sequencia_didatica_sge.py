@@ -128,6 +128,93 @@ def _atualizar_status_publicacao_notion(page_id: str, status: str, logger=None, 
         _log(logger, f"Aviso: falha ao atualizar status de publicacao no Notion ({pid}): {exc}")
 
 
+def _status_publicacao_select_def() -> Dict:
+    return {
+        "select": {
+            "options": [
+                {"name": "Pendente", "color": "yellow"},
+                {"name": "Em execucao", "color": "blue"},
+                {"name": "Publicado no SGE", "color": "green"},
+                {"name": "Simulado (dry run)", "color": "gray"},
+                {"name": "Erro na publicacao", "color": "red"},
+            ]
+        }
+    }
+
+
+def _extract_data_source_id_from_db(database_obj: Optional[Dict]) -> str:
+    if not database_obj:
+        return ""
+    data_sources = database_obj.get("data_sources", [])
+    if not data_sources:
+        return ""
+    first = data_sources[0]
+    if isinstance(first, dict):
+        return (first.get("id") or "").strip()
+    return ""
+
+
+def _ensure_status_publicacao_property(
+    notion: Client,
+    database_id: str,
+    database_obj: Optional[Dict],
+    logger=None,
+) -> None:
+    prop_name = (NOTION_STATUS_PUBLICACAO_PROP or "").strip()
+    if not prop_name:
+        return
+
+    props = (database_obj or {}).get("properties", {}) or {}
+    if prop_name in props:
+        return
+
+    prop_def = _status_publicacao_select_def()
+
+    # Notion classico: atualiza direto na database.
+    try:
+        _safe_notion_call(
+            lambda: notion.databases.update(
+                database_id=database_id,
+                properties={prop_name: prop_def},
+            )
+        )
+        _log(logger, f"Coluna '{prop_name}' criada/garantida na database de sequencias.")
+        return
+    except Exception as exc_db:  # noqa: BLE001
+        _log(logger, f"Aviso: nao foi possivel criar coluna via databases.update: {exc_db}")
+
+    # Notion data_sources: atualiza no data source vinculado.
+    if not (hasattr(notion, "data_sources") and hasattr(notion.data_sources, "update")):
+        return
+
+    ds_id = _extract_data_source_id_from_db(database_obj)
+    if not ds_id:
+        try:
+            db_obj = _safe_notion_call(lambda: notion.databases.retrieve(database_id=database_id))
+            ds_id = _extract_data_source_id_from_db(db_obj)
+        except Exception:  # noqa: BLE001
+            ds_id = ""
+
+    if not ds_id:
+        return
+
+    try:
+        ds_obj = _safe_notion_call(lambda: notion.data_sources.retrieve(data_source_id=ds_id))
+        ds_props = ds_obj.get("properties", {}) or {}
+        if prop_name in ds_props:
+            return
+
+        _safe_notion_call(
+            lambda: notion.data_sources.update(
+                data_source_id=ds_id,
+                properties={prop_name: prop_def},
+            )
+        )
+        _log(logger, f"Coluna '{prop_name}' criada/garantida no data source da database de sequencias.")
+    except Exception as exc_ds:  # noqa: BLE001
+        _log(logger, f"Aviso: falha ao garantir coluna '{prop_name}' no data source: {exc_ds}")
+
+
 def _ano_from_turma(turma: str) -> str:
     m = re.search(r"([6-9])\s*[oº]?\s*ano", turma or "", flags=re.IGNORECASE)
     return f"{m.group(1)}º Ano" if m else ""
@@ -404,6 +491,8 @@ def _load_sequencias_from_notion(logger=None) -> List[SequenciaRegistro]:
     db_obj = _safe_notion_call(lambda: notion.databases.retrieve(database_id=alvo_id))
     title = _database_title(db_obj)
     _log(logger, f"Database de sequencias identificada: {title}")
+
+    _ensure_status_publicacao_property(notion, alvo_id, db_obj, logger=logger)
 
     rows = _query_database_rows(notion, alvo_id, database_obj=db_obj)
     result: List[SequenciaRegistro] = []
