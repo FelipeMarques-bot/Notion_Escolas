@@ -491,9 +491,21 @@ def _calc_n_aulas_from_periodo(inicio: str, fim: str) -> int:
 
 
 def _canon_file_name(name: str) -> str:
-    text = _normalize(name or "")
-    text = re.sub(r"\.pdf$", "", text).strip()
-    text = re.sub(r"\s+", " ", text)
+    text = _normalize((name or "").strip())
+    # Usa apenas o nome final caso venha URL/caminho.
+    text = os.path.basename(text.split("?", 1)[0])
+
+    # Remove extensoes em cascata comuns (ex.: .docx.pdf, .pdf, .docx).
+    while True:
+        trimmed = re.sub(r"\.(pdf|docx|doc)$", "", text, flags=re.IGNORECASE).strip()
+        if trimmed == text:
+            break
+        text = trimmed
+
+    # Uniformiza separadores e remove pontuacao para tolerar variacoes
+    # como 25/05 vs 25-05 vs 25.05.
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
     return text
 
 
