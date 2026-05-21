@@ -51,6 +51,11 @@ on:
         required: false
         default: ""
         type: string
+      referencias_turma:
+        description: "Referências de turma (opcional, ex.: 1,2). Usa com escola + modo rápido sem precisar nome completo."
+        required: false
+        default: ""
+        type: string
       modo_execucao:
         description: Tipo de lancamento (como aplicar os planos)
         required: true
@@ -158,6 +163,7 @@ jobs:
           NOTION_CLIENT_LOG_LEVEL: CRITICAL
           INPUT_ESCOLA: ${{ github.event.inputs.escola }}
           INPUT_TURMA: ${{ github.event.inputs.turma }}
+          INPUT_REFERENCIAS_TURMA: ${{ github.event.inputs.referencias_turma }}
           INPUT_MODO: ${{ github.event.inputs.modo_execucao }}
           INPUT_MODO_RAPIDO: ${{ github.event.inputs.modo_rapido }}
           INPUT_DRY_RUN: ${{ github.event.inputs.dry_run }}
@@ -185,6 +191,7 @@ jobs:
 
           if [[ -n "$INPUT_ESCOLA" && "$INPUT_ESCOLA" != "Todas" ]]; then ARGS+=("--escola" "$INPUT_ESCOLA"); fi
           if [[ -n "$INPUT_TURMA" ]]; then ARGS+=("--turma" "$INPUT_TURMA"); fi
+          if [[ -n "$INPUT_REFERENCIAS_TURMA" ]]; then ARGS+=("--referencias-turma" "$INPUT_REFERENCIAS_TURMA"); fi
           if [[ -n "$MODO_CLI" ]]; then ARGS+=("--modo-execucao" "$MODO_CLI"); fi
           if [[ "$INPUT_MODO_RAPIDO" == "true" ]]; then ARGS+=("--modo-rapido"); fi
           if [[ -n "$INPUT_DATA_INICIO" ]]; then ARGS+=("--data-inicio" "$INPUT_DATA_INICIO"); fi

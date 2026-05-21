@@ -107,6 +107,39 @@ def _turnos_por_escola(escola: str) -> List[str]:
     return ESCOLA_TURNOS_PADRAO.get(key, [])
 
 
+def _parse_turma_referencias(raw: str) -> List[str]:
+    text = (raw or "").strip()
+    if not text:
+        return []
+
+    refs: List[str] = []
+    for part in re.split(r"[;,\s]+", text):
+        p = (part or "").strip()
+        if not p:
+            continue
+        m = re.search(r"(\d+)", p)
+        if m:
+            refs.append(m.group(1))
+
+    # Remove duplicadas preservando ordem.
+    seen = set()
+    out: List[str] = []
+    for ref in refs:
+        if ref in seen:
+            continue
+        seen.add(ref)
+        out.append(ref)
+    return out
+
+
+def _extract_turma_ref(turma_label: str) -> str:
+    norm = _normalize(turma_label or "")
+    m = re.search(r"\b([6-9])o\s*ano\s*(\d+)\b", norm)
+    if m:
+        return (m.group(2) or "").strip()
+    return ""
+
+
 def _anos_alvo_por_arquivo(arquivo_por_ano: Optional[Dict[str, str]]) -> List[str]:
     if not arquivo_por_ano:
         return []
@@ -789,7 +822,13 @@ def _load_sequencias_from_notion(logger=None, ensure_status_property: bool = Tru
     return result
 
 
-def _filter_contexts(contextos_raw: List[Dict[str, str]], escola: str, trimestre: str, turma: str = "") -> List[ContextoPlano]:
+def _filter_contexts(
+    contextos_raw: List[Dict[str, str]],
+    escola: str,
+    trimestre: str,
+    turma: str = "",
+    turma_refs: Optional[List[str]] = None,
+) -> List[ContextoPlano]:
     filtered: List[ContextoPlano] = []
     for item in contextos_raw:
         ctx = ContextoPlano(
@@ -804,6 +843,10 @@ def _filter_contexts(contextos_raw: List[Dict[str, str]], escola: str, trimestre
             continue
         if turma and not _turma_matches(turma, ctx.turma):
             continue
+        if turma_refs:
+            ref_ctx = _extract_turma_ref(ctx.turma)
+            if ref_ctx and ref_ctx not in turma_refs:
+                continue
         filtered.append(ctx)
     return filtered
 
@@ -1482,6 +1525,7 @@ def _executar_fluxo_plano_aulas(page, contexto: ContextoPlano, registro: Sequenc
 def executar_lancamento_sequencia(
     escola: str = "",
     turma: str = "",
+    referencias_turma: str = "",
     trimestre: str = "2º Trimestre",
     modo_execucao: str = "por_escola",
     dry_run: bool = False,
@@ -1503,6 +1547,7 @@ def executar_lancamento_sequencia(
     registros = _load_sequencias_from_notion(logger=logger, ensure_status_property=(not modo_rapido))
 
     turma_input = _canon_turma_label(turma) or turma
+    turma_refs = _parse_turma_referencias(referencias_turma)
 
     contextos: List[ContextoPlano] = []
     if modo_rapido and escola and turma:
@@ -1516,6 +1561,27 @@ def executar_lancamento_sequencia(
             for turno in turnos
         ]
         _log(logger, f"Modo rapido: usando contexto direto sem descoberta no Notion ({len(contextos)} turno(s)).")
+    elif modo_rapido and escola and turma_refs:
+        anos_alvo = _anos_alvo_por_arquivo(arquivo_por_ano)
+        if not anos_alvo:
+            anos_alvo = ["6º Ano", "7º Ano", "8º Ano", "9º Ano"]
+
+        turnos = _turnos_por_escola(escola)
+        if not turnos:
+            turnos = ["Matutino", "Vespertino"]
+
+        for turno in turnos:
+            for ano in anos_alvo:
+                for ref in turma_refs:
+                    contextos.append(
+                        ContextoPlano(
+                            escola=escola,
+                            turno=turno,
+                            turma=f"{ano} {ref}",
+                            trimestre=trimestre,
+                        )
+                    )
+        _log(logger, f"Modo rapido: usando referencias de turma ({','.join(turma_refs)}) sem descoberta no Notion.")
     else:
         filtro_contexto: Dict[str, str] = {}
         if escola:
@@ -1530,6 +1596,7 @@ def executar_lancamento_sequencia(
             escola=escola,
             trimestre=trimestre,
             turma=turma_input,
+            turma_refs=turma_refs,
         )
 
     if not contextos:
@@ -1679,6 +1746,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Lanca sequencia didatica (Plano de Aulas) no SGE")
     parser.add_argument("--escola", default="")
     parser.add_argument("--turma", default="")
+    parser.add_argument("--referencias-turma", default="")
     parser.add_argument("--trimestre", default="2º Trimestre")
     parser.add_argument("--modo-execucao", default="por_escola", choices=["por_escola", "por_turma_em_todas_as_escolas"])
     parser.add_argument("--modo-rapido", action="store_true")
@@ -1706,6 +1774,7 @@ def main() -> int:
         resumo = executar_lancamento_sequencia(
             escola=args.escola if args.escola and _normalize(args.escola) != "todas" else "",
             turma=args.turma,
+            referencias_turma=args.referencias_turma,
             trimestre=args.trimestre,
             modo_execucao=args.modo_execucao,
             dry_run=args.dry_run,
