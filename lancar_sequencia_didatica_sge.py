@@ -895,6 +895,7 @@ def _open_plano_aulas_for_context(page, contexto: ContextoPlano, logger=None) ->
     _set_filters_on_portal(page, contexto, logger=logger)
 
     turma_num = _extract_turma_number(contexto.turma)
+    serie_num = _extract_first_number(contexto.turma)
     trimestre_num = _extract_first_number(contexto.trimestre)
     turno_norm = _normalize(contexto.turno).upper()
     turma_norm = _normalize(contexto.turma)
@@ -905,23 +906,30 @@ def _open_plano_aulas_for_context(page, contexto: ContextoPlano, logger=None) ->
         turma_suffix = (m_turma.group(2) or "").strip()
 
     def _matches_turma_label(norm: str) -> bool:
-        if not turma_num:
+        # 1) Série (6,7,8,9) deve bater quando disponível.
+        if serie_num:
+            serie = re.escape(serie_num)
+            serie_patterns = [
+                rf"\b{serie}o\s*ano\b",
+                rf"\b{serie}\s*o\s*ano\b",
+                rf"\bserie\s*{serie}\b",
+            ]
+            if not any(re.search(p, norm) for p in serie_patterns):
+                return False
+
+        # 2) Quando houver sufixo de turma (ex.: 6º Ano 1), ele deve bater.
+        suffix = (turma_suffix or turma_num or "").strip()
+        if not suffix:
             return True
 
-        num = re.escape(turma_num)
-        patterns = [
-            rf"\bturma\s*{num}\b",
-            rf"\b{num}o\s*ano\b",
-            rf"\b{num}\s*o\s*ano\b",
+        sfx = re.escape(suffix)
+        suffix_patterns = [
+            rf"\bturma\s*{sfx}\b",
+            rf"\b{sfx}\b",
+            rf"\b{re.escape(serie_num)}o\s*ano\s*{sfx}\b" if serie_num else rf"\bano\s*{sfx}\b",
         ]
-
-        if not any(re.search(p, norm) for p in patterns):
+        if not any(re.search(p, norm) for p in suffix_patterns):
             return False
-
-        # Quando a turma tiver sufixo (ex.: 6º Ano 1), exige o sufixo.
-        if turma_suffix and not re.search(rf"\b{re.escape(turma_suffix)}\b", norm):
-            return False
-
         return True
 
     for scope in _iter_scopes(page):
@@ -934,7 +942,7 @@ def _open_plano_aulas_for_context(page, contexto: ContextoPlano, logger=None) ->
             page.wait_for_timeout(300)
 
         total = hidden_rows.count()
-        for strict_trim in (True, False):
+        for strict_turno, strict_trim in ((True, True), (True, False), (False, False)):
             for idx in range(total):
                 cell = hidden_rows.nth(idx)
                 try:
@@ -943,7 +951,10 @@ def _open_plano_aulas_for_context(page, contexto: ContextoPlano, logger=None) ->
                     continue
 
                 norm = _normalize(label)
-                ok_turno = bool(turno_norm and _normalize(turno_norm) in norm)
+                if strict_turno:
+                    ok_turno = bool(turno_norm and _normalize(turno_norm) in norm)
+                else:
+                    ok_turno = True
                 ok_turma = _matches_turma_label(norm)
 
                 if strict_trim and trimestre_num:
