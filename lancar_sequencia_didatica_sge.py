@@ -982,6 +982,62 @@ def _open_plano_aulas_for_context(page, contexto: ContextoPlano, logger=None) ->
     if m_turma:
         turma_suffix = (m_turma.group(2) or "").strip()
 
+    def _click_plano_icon_in_row(row) -> bool:
+        try:
+            nodes = row.locator("a, input[type='image'], button, img")
+            total_nodes = nodes.count()
+        except Exception:  # noqa: BLE001
+            return False
+
+        clickable = []
+        for i in range(total_nodes):
+            node = nodes.nth(i)
+            try:
+                meta = " ".join(
+                    [
+                        (node.get_attribute("title") or ""),
+                        (node.get_attribute("alt") or ""),
+                        (node.get_attribute("name") or ""),
+                        (node.get_attribute("id") or ""),
+                        (node.get_attribute("src") or ""),
+                        (node.get_attribute("aria-label") or ""),
+                        (node.get_attribute("onclick") or ""),
+                    ]
+                )
+            except Exception:  # noqa: BLE001
+                meta = ""
+            clickable.append((node, _normalize(meta)))
+
+        # 1) Preferencial: metadado contendo plano/planejamento.
+        for node, meta in clickable:
+            if "plano" not in meta and "planej" not in meta:
+                continue
+            try:
+                anchor = node.locator("xpath=ancestor::a[1]")
+                if anchor.count() > 0:
+                    anchor.first.click(timeout=ACTION_TIMEOUT_MS)
+                else:
+                    node.click(timeout=ACTION_TIMEOUT_MS)
+                return True
+            except Exception:  # noqa: BLE001
+                continue
+
+        # 2) Fallback pragmático: 2º ícone de ação da linha
+        # (na UI do SGE costuma ser Plano de Aulas, conforme legenda).
+        if len(clickable) >= 2:
+            try:
+                node = clickable[1][0]
+                anchor = node.locator("xpath=ancestor::a[1]")
+                if anchor.count() > 0:
+                    anchor.first.click(timeout=ACTION_TIMEOUT_MS)
+                else:
+                    node.click(timeout=ACTION_TIMEOUT_MS)
+                return True
+            except Exception:  # noqa: BLE001
+                pass
+
+        return False
+
     def _matches_turma_label(norm: str) -> bool:
         # 1) Série (6,7,8,9) deve bater quando disponível.
         if serie_num:
@@ -1010,6 +1066,48 @@ def _open_plano_aulas_for_context(page, contexto: ContextoPlano, logger=None) ->
         return True
 
     for scope in _iter_scopes(page):
+        # Fase 0: varre linhas visiveis da tabela pelo texto renderizado.
+        # Esta fase cobre layouts em que nao existem (ou mudaram) os inputs TURNUMSTR_.
+        try:
+            table_rows = scope.locator("tr")
+            total_rows = table_rows.count()
+        except Exception:  # noqa: BLE001
+            total_rows = 0
+
+        if total_rows > 0:
+            for strict_turno, strict_trim in ((True, True), (True, False), (False, False)):
+                for idx in range(total_rows):
+                    row = table_rows.nth(idx)
+                    try:
+                        label = (row.inner_text(timeout=200) or "").strip()
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if not label:
+                        continue
+
+                    norm = _normalize(label)
+                    if "turma" not in norm and "ano" not in norm:
+                        continue
+
+                    if strict_turno:
+                        ok_turno = bool(turno_norm and _normalize(turno_norm) in norm)
+                    else:
+                        ok_turno = True
+                    ok_turma = _matches_turma_label(norm)
+
+                    if strict_trim and trimestre_num:
+                        ok_trim = bool(f"{trimestre_num}o trimestre" in norm or ("trimestre" in norm and str(trimestre_num) in norm))
+                    else:
+                        ok_trim = True
+
+                    if not (ok_turno and ok_turma and ok_trim):
+                        continue
+
+                    if _click_plano_icon_in_row(row):
+                        page.wait_for_timeout(800)
+                        _log(logger, f"Plano de Aulas aberto pela linha visivel: {label}")
+                        return True
+
         # Aguarda o grid responder ao filtro.
         hidden_rows = scope.locator("input[name^='W0019W0075_TURNUMSTR_'], input[name*='TURNUMSTR_']")
         for _ in range(20):
