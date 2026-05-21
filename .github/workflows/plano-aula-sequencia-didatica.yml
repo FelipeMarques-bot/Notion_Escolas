@@ -52,7 +52,7 @@ on:
         default: ""
         type: string
       referencias_turma:
-        description: "Referências de turma (opcional, ex.: 1,2). Usa com escola + modo rápido sem precisar nome completo."
+        description: "Referências de turma (opcional, ex.: 1,2). Se vazio, tenta inferir automaticamente (1,2 ou mais) pela escola."
         required: false
         default: ""
         type: string

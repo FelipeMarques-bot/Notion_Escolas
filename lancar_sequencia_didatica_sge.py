@@ -140,6 +140,40 @@ def _extract_turma_ref(turma_label: str) -> str:
     return ""
 
 
+def _infer_turma_refs_for_escola(
+    escola: str,
+    trimestre: str,
+    anos_alvo: List[str],
+    logger=None,
+) -> List[str]:
+    filtro = {"escola": escola, "trimestre": trimestre}
+    try:
+        ctxs = listar_contextos_disponiveis(logger=logger, filtro=filtro)
+    except Exception:  # noqa: BLE001
+        return []
+
+    refs: List[str] = []
+    anos_norm = {_normalize(a) for a in anos_alvo}
+    for item in ctxs:
+        turma_ctx = item.get("turma", "")
+        ano_ctx = _ano_from_turma(turma_ctx)
+        if anos_norm and _normalize(ano_ctx) not in anos_norm:
+            continue
+        ref = _extract_turma_ref(turma_ctx)
+        if ref:
+            refs.append(ref)
+
+    # Remove duplicadas preservando ordem.
+    seen = set()
+    out: List[str] = []
+    for ref in refs:
+        if ref in seen:
+            continue
+        seen.add(ref)
+        out.append(ref)
+    return out
+
+
 def _anos_alvo_por_arquivo(arquivo_por_ano: Optional[Dict[str, str]]) -> List[str]:
     if not arquivo_por_ano:
         return []
@@ -1582,6 +1616,31 @@ def executar_lancamento_sequencia(
                         )
                     )
         _log(logger, f"Modo rapido: usando referencias de turma ({','.join(turma_refs)}) sem descoberta no Notion.")
+    elif modo_rapido and escola and not turma_input:
+        anos_alvo = _anos_alvo_por_arquivo(arquivo_por_ano)
+        if not anos_alvo:
+            anos_alvo = ["6º Ano", "7º Ano", "8º Ano", "9º Ano"]
+
+        refs_auto = _infer_turma_refs_for_escola(escola=escola, trimestre=trimestre, anos_alvo=anos_alvo, logger=logger)
+        if not refs_auto:
+            refs_auto = ["1", "2"]
+
+        turnos = _turnos_por_escola(escola)
+        if not turnos:
+            turnos = ["Matutino", "Vespertino"]
+
+        for turno in turnos:
+            for ano in anos_alvo:
+                for ref in refs_auto:
+                    contextos.append(
+                        ContextoPlano(
+                            escola=escola,
+                            turno=turno,
+                            turma=f"{ano} {ref}",
+                            trimestre=trimestre,
+                        )
+                    )
+        _log(logger, f"Modo rapido: referencias de turma inferidas automaticamente ({','.join(refs_auto)}).")
     else:
         filtro_contexto: Dict[str, str] = {}
         if escola:
