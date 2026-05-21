@@ -908,12 +908,12 @@ def _open_plano_aulas_for_context(page, contexto: ContextoPlano, logger=None) ->
 
     for scope in _iter_scopes(page):
         # Aguarda o grid responder ao filtro.
-        for _ in range(8):
-            hidden_rows = scope.locator("input[name^='W0019W0075_TURNUMSTR_']")
+        hidden_rows = scope.locator("input[name^='W0019W0075_TURNUMSTR_'], input[name*='TURNUMSTR_']")
+        for _ in range(20):
             total = hidden_rows.count()
             if total > 0:
                 break
-            page.wait_for_timeout(250)
+            page.wait_for_timeout(300)
 
         total = hidden_rows.count()
         for strict_trim in (True, False):
@@ -938,13 +938,27 @@ def _open_plano_aulas_for_context(page, contexto: ContextoPlano, logger=None) ->
 
                 name = (cell.get_attribute("name") or "")
                 suffix = name.rsplit("_", 1)[-1]
+
+                # Primeiro tenta abrir pela coluna de cabecalho (mais estavel que ID fixo).
+                try:
+                    row = cell.locator("xpath=ancestor::tr[1]")
+                    if row.count() > 0 and _click_cell_action_by_header(row.first, "plano", prefer_arrow=False):
+                        page.wait_for_timeout(800)
+                        _log(logger, f"Plano de Aulas aberto pela coluna de cabecalho: {label}")
+                        return True
+                except Exception:  # noqa: BLE001
+                    pass
+
                 selectors = [
                     f"#W0019W0075_PLANOAULA_{suffix}",
                     f"img[name='W0019W0075_PLANOAULA_{suffix}']",
+                    f"img[name*='PLANOAULA_{suffix}']",
                     f"#W0019W0075_PLANODEAULA_{suffix}",
                     f"img[name='W0019W0075_PLANODEAULA_{suffix}']",
+                    f"img[name*='PLANODEAULA_{suffix}']",
                     f"#W0019W0075_PLANOAULAS_{suffix}",
                     f"img[name='W0019W0075_PLANOAULAS_{suffix}']",
+                    f"img[name*='PLANOAULAS_{suffix}']",
                     f"a[id*='PLANOAULA_{suffix}']",
                     f"a[name*='PLANOAULA_{suffix}']",
                 ]
@@ -959,6 +973,45 @@ def _open_plano_aulas_for_context(page, contexto: ContextoPlano, logger=None) ->
                         return True
                     except Exception:  # noqa: BLE001
                         continue
+
+        # Fallback final: tenta clicar por metadado "plano" na primeira linha
+        # que bater turno+turma, sem depender de IDs internos.
+        for idx in range(total):
+            cell = hidden_rows.nth(idx)
+            try:
+                label = (cell.input_value(timeout=300) or "").strip()
+            except Exception:  # noqa: BLE001
+                continue
+
+            norm = _normalize(label)
+            if not (bool(turno_norm and _normalize(turno_norm) in norm) and _matches_turma_label(norm)):
+                continue
+
+            try:
+                row = cell.locator("xpath=ancestor::tr[1]")
+                if row.count() == 0:
+                    continue
+                icons = row.first.locator("a, img, input[type='image'], button")
+                icount = icons.count()
+                for j in range(icount):
+                    node = icons.nth(j)
+                    meta = " ".join(
+                        [
+                            (node.get_attribute("title") or ""),
+                            (node.get_attribute("alt") or ""),
+                            (node.get_attribute("name") or ""),
+                            (node.get_attribute("id") or ""),
+                            (node.get_attribute("src") or ""),
+                        ]
+                    )
+                    if "plano" not in _normalize(meta):
+                        continue
+                    node.click(timeout=ACTION_TIMEOUT_MS)
+                    page.wait_for_timeout(800)
+                    _log(logger, f"Plano de Aulas aberto por metadado de icone: {label}")
+                    return True
+            except Exception:  # noqa: BLE001
+                continue
 
     # Fallback do print: abrir via menu de rodape.
     if _click_text_any_scope(page, "Plano de Aulas"):
