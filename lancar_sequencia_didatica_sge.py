@@ -351,8 +351,41 @@ def _parse_periodo_text(periodo_texto: str) -> Tuple[str, str]:
     if len(matches) < 2:
         return "", ""
 
-    i = _fmt_date_ddmmyyyy(matches[0])
-    f = _fmt_date_ddmmyyyy(matches[1])
+    def _has_year(raw_date: str) -> bool:
+        return bool(re.fullmatch(r"\d{1,2}/\d{1,2}/\d{2,4}", (raw_date or "").strip()))
+
+    def _append_year_if_missing(raw_date: str, year: int) -> str:
+        raw = (raw_date or "").strip()
+        if not raw:
+            return ""
+        if _has_year(raw):
+            return raw
+        return f"{raw}/{year}"
+
+    inicio_raw = matches[0]
+    fim_raw = matches[1]
+
+    # Quando o periodo vier como dd/mm a dd/mm (sem ano), assume ano corrente.
+    # Se o intervalo cruzar ano (ex.: 20/12 a 15/01), ajusta o fim para ano seguinte.
+    if not _has_year(inicio_raw) and not _has_year(fim_raw):
+        base_year = datetime.now().year
+        inicio_guess = _append_year_if_missing(inicio_raw, base_year)
+        fim_guess = _append_year_if_missing(fim_raw, base_year)
+        i_guess = _fmt_date_ddmmyyyy(inicio_guess)
+        f_guess = _fmt_date_ddmmyyyy(fim_guess)
+        try:
+            dt_i = datetime.strptime(i_guess, "%d/%m/%Y")
+            dt_f = datetime.strptime(f_guess, "%d/%m/%Y")
+            if dt_f < dt_i:
+                fim_guess = _append_year_if_missing(fim_raw, base_year + 1)
+        except Exception:  # noqa: BLE001
+            pass
+
+        inicio_raw = inicio_guess
+        fim_raw = fim_guess
+
+    i = _fmt_date_ddmmyyyy(inicio_raw)
+    f = _fmt_date_ddmmyyyy(fim_raw)
     return i, f
 
 
@@ -683,9 +716,13 @@ def _load_sequencias_from_notion(logger=None, ensure_status_property: bool = Tru
                 if end:
                     periodo_fim = _fmt_date_ddmmyyyy(end)
 
-        # Compatibilidade: quando 'Período' for texto (ex.: 25/05 a 19/06).
+        # Compatibilidade: quando o periodo vier em texto (ex.: 25/05 a 19/06).
         if not periodo_inicio or not periodo_fim:
             periodo_txt = _extract_select_or_text(props, ["Período", "Periodo"])
+            if not periodo_txt:
+                # Fallback adicional: alguns registros trazem o periodo no titulo.
+                periodo_txt = " ".join([titulo_documento, titulo_linha, arquivo_nome]).strip()
+
             pi_txt, pf_txt = _parse_periodo_text(periodo_txt)
             periodo_inicio = periodo_inicio or pi_txt
             periodo_fim = periodo_fim or pf_txt
