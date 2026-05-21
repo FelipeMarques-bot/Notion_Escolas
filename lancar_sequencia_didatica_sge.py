@@ -107,6 +107,24 @@ def _turnos_por_escola(escola: str) -> List[str]:
     return ESCOLA_TURNOS_PADRAO.get(key, [])
 
 
+def _anos_alvo_por_arquivo(arquivo_por_ano: Optional[Dict[str, str]]) -> List[str]:
+    if not arquivo_por_ano:
+        return []
+    return [ano for ano, nome in arquivo_por_ano.items() if (nome or "").strip()]
+
+
+def _is_transient_sge_access_error(exc: Exception) -> bool:
+    msg = _normalize(str(exc))
+    markers = [
+        "nao foi possivel abrir plano de aulas",
+        "timeout",
+        "sessao",
+        "login",
+        "naveg",
+    ]
+    return any(marker in msg for marker in markers)
+
+
 def _make_rich_text(content: str) -> List[Dict]:
     text = (content or "")[:1900]
     if not text:
@@ -1511,6 +1529,18 @@ def executar_lancamento_sequencia(
     else:
         contextos = sorted(contextos, key=lambda c: (_normalize(c.escola), _normalize(c.turno), _ano_from_turma(c.turma), _normalize(c.turma)))
 
+    # No modo rapido sem turma explicita, limita aos anos que realmente
+    # possuem arquivo informado no input, evitando processar anos sem template.
+    if modo_rapido and not turma_input:
+        anos_alvo = _anos_alvo_por_arquivo(arquivo_por_ano)
+        if anos_alvo:
+            before = len(contextos)
+            contextos = [c for c in contextos if _ano_from_turma(c.turma) in anos_alvo]
+            _log(logger, f"Modo rapido: contextos filtrados por anos alvo ({before} -> {len(contextos)}).")
+
+    if not contextos:
+        raise LancamentoError("Nenhum contexto de turma encontrado apos aplicar filtros/anos alvo.")
+
     resumo = ExecucaoResumo(contextos_total=len(contextos))
 
     with sync_playwright() as p:
@@ -1553,23 +1583,46 @@ def executar_lancamento_sequencia(
                 resumo.falhas += 1
                 continue
 
-            try:
-                if not modo_rapido:
-                    _atualizar_status_publicacao_notion(
-                        registro.page_id,
-                        "Em execucao",
-                        logger=logger,
-                        log_text=f"Iniciado para {ctx.escola} | {ctx.turno} | {ctx.turma} | {ctx.trimestre}",
-                    )
-
-                ok_plan, ok_anexo, ok_sit = _executar_fluxo_plano_aulas(
-                    page,
-                    contexto=ctx,
-                    registro=registro,
-                    dry_run=dry_run,
+            if not modo_rapido:
+                _atualizar_status_publicacao_notion(
+                    registro.page_id,
+                    "Em execucao",
                     logger=logger,
+                    log_text=f"Iniciado para {ctx.escola} | {ctx.turno} | {ctx.turma} | {ctx.trimestre}",
                 )
 
+            ok_plan = False
+            ok_anexo = False
+            ok_sit = False
+            last_exc: Optional[Exception] = None
+
+            for tentativa in range(1, 3):
+                try:
+                    ok_plan, ok_anexo, ok_sit = _executar_fluxo_plano_aulas(
+                        page,
+                        contexto=ctx,
+                        registro=registro,
+                        dry_run=dry_run,
+                        logger=logger,
+                    )
+                    last_exc = None
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    last_exc = exc
+                    can_retry = tentativa == 1 and (
+                        isinstance(exc, PlaywrightTimeoutError) or _is_transient_sge_access_error(exc)
+                    )
+                    if not can_retry:
+                        break
+
+                    _log(logger, f"Aviso: tentativa {tentativa} falhou para {ctx.escola} | {ctx.turma}. Reautenticando no SGE e tentando novamente...")
+                    try:
+                        _login_sge(page, cpf=cpf, senha=senha, logger=logger)
+                    except Exception as relog_exc:  # noqa: BLE001
+                        last_exc = relog_exc
+                        break
+
+            if last_exc is None:
                 if not modo_rapido:
                     status_final = "Simulado (dry run)" if dry_run else "Publicado no SGE"
                     _atualizar_status_publicacao_notion(
@@ -1588,28 +1641,22 @@ def executar_lancamento_sequencia(
                     resumo.anexos_enviados += 1
                 if ok_sit:
                     resumo.situacoes_ativadas += 1
-            except PlaywrightTimeoutError as exc:
-                resumo.falhas += 1
-                _log(logger, f"Falha por timeout em {ctx.escola} | {ctx.turma}: {exc}")
-                if not modo_rapido:
-                    _atualizar_status_publicacao_notion(
-                        registro.page_id,
-                        "Erro na publicacao",
-                        logger=logger,
-                        log_text=f"Timeout em {ctx.escola} | {ctx.turno} | {ctx.turma} | {ctx.trimestre}: {exc}",
-                    )
-                _click_inicio(page)
-            except Exception as exc:  # noqa: BLE001
-                resumo.falhas += 1
-                _log(logger, f"Falha em {ctx.escola} | {ctx.turma}: {exc}")
-                if not modo_rapido:
-                    _atualizar_status_publicacao_notion(
-                        registro.page_id,
-                        "Erro na publicacao",
-                        logger=logger,
-                        log_text=f"Erro em {ctx.escola} | {ctx.turno} | {ctx.turma} | {ctx.trimestre}: {exc}",
-                    )
-                _click_inicio(page)
+                continue
+
+            resumo.falhas += 1
+            if isinstance(last_exc, PlaywrightTimeoutError):
+                _log(logger, f"Falha por timeout em {ctx.escola} | {ctx.turma}: {last_exc}")
+            else:
+                _log(logger, f"Falha em {ctx.escola} | {ctx.turma}: {last_exc}")
+
+            if not modo_rapido:
+                _atualizar_status_publicacao_notion(
+                    registro.page_id,
+                    "Erro na publicacao",
+                    logger=logger,
+                    log_text=f"Erro em {ctx.escola} | {ctx.turno} | {ctx.turma} | {ctx.trimestre}: {last_exc}",
+                )
+            _click_inicio(page)
 
         context.close()
         browser.close()
