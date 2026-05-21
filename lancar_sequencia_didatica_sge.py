@@ -491,9 +491,12 @@ def _calc_n_aulas_from_periodo(inicio: str, fim: str) -> int:
 
 
 def _canon_file_name(name: str) -> str:
-    text = _normalize((name or "").strip())
-    # Usa apenas o nome final caso venha URL/caminho.
-    text = os.path.basename(text.split("?", 1)[0])
+    raw = (name or "").strip()
+    # Usa basename apenas quando o texto for URL ou caminho absoluto,
+    # nao para titulos normais que contenham "/" como separador de data.
+    if "://" in raw or raw.startswith("/"):
+        raw = os.path.basename(raw.split("?", 1)[0]) or raw
+    text = _normalize(raw)
 
     # Remove extensoes em cascata comuns (ex.: .docx.pdf, .pdf, .docx).
     while True:
@@ -1333,8 +1336,7 @@ def _click_plus_planejamento(page) -> bool:
 
 def _click_cell_action_by_header(row, header_key: str, prefer_arrow: bool = False) -> bool:
         js = """
-        ({ key, preferArrow }) => {
-            const tr = rowEl;
+        (tr, { key, preferArrow }) => {
             const table = tr.closest('table');
             if (!table) return false;
 
@@ -1396,7 +1398,7 @@ def _click_cell_action_by_header(row, header_key: str, prefer_arrow: bool = Fals
         """
         try:
             return bool(row.evaluate(
-                js.replace("rowEl", "el"),
+                js,
                 {"key": header_key, "preferArrow": prefer_arrow},
             ))
         except Exception:  # noqa: BLE001
