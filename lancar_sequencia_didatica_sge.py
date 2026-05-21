@@ -1271,6 +1271,7 @@ def _open_plano_aulas_for_context(page, contexto: ContextoPlano, logger=None) ->
     # Fallback do print: abrir via menu de rodape.
     if _click_text_any_scope(page, "Plano de Aulas"):
         page.wait_for_timeout(700)
+        _log(logger, "Plano de Aulas aberto via fallback de texto.")
         return True
 
     return False
@@ -1339,35 +1340,67 @@ def _click_confirmar(page) -> bool:
 
 
 def _click_plus_planejamento(page) -> bool:
-        js = """
-        () => {
-            const txt = Array.from(document.querySelectorAll('body *')).find((el) => {
-                const t = (el.textContent || '').toLowerCase();
-                return t.includes('planejamentos:');
-            });
-            if (!txt) return false;
-            const root = txt.closest('table, div, tr, td') || txt.parentElement || document.body;
-            const candidate = root.querySelector('img[alt="+"], input[type="image"][alt="+"], a img[alt="+"], img[src*="plus" i], img[src*="mais" i]');
-            if (!candidate) return false;
-            const clickable = candidate.closest('a, button, input[type="image"]') || candidate;
-            clickable.click();
-            return true;
-        }
-        """
-        try:
-            if page.evaluate(js):
-                return True
-        except Exception:  # noqa: BLE001
-            pass
+    js = """
+    () => {
+        const norm = (s) => (s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+        const addSelectors = [
+            'img[alt="+"]', 'input[type="image"][alt="+"]', 'a img[alt="+"]',
+            'img[src*="plus" i]', 'img[src*="mais" i]', 'img[src*="add" i]',
+            'img[alt*="novo" i]', 'img[alt*="adicionar" i]', 'img[title*="novo" i]',
+            'a[title*="novo" i]', 'a[title*="adicionar" i]',
+        ];
+        const qs = (root, sel) => { try { return root.querySelector(sel); } catch(e) { return null; } };
 
-        selectors = [
-            "img[alt='+']",
-            "input[type='image'][alt='+']",
-            "a:has(img[alt='+'])",
-            "img[src*='plus' i]",
-            "img[src*='mais' i]",
-        ]
-        return _click_any_selector_any_scope(page, selectors)
+        // 1) Procura junto ao texto "planejamento"
+        const labelEl = Array.from(document.querySelectorAll('body *')).find((el) => {
+            return el.children.length === 0 && norm(el.textContent).includes('planejamento');
+        });
+        if (labelEl) {
+            const root = labelEl.closest('table, div, tr, td, section, fieldset') || labelEl.parentElement || document.body;
+            for (const sel of addSelectors) {
+                const c = qs(root, sel);
+                if (c) { (c.closest('a, button, input[type="image"]') || c).click(); return true; }
+            }
+        }
+
+        // 2) Qualquer icone "+" / novo na pagina inteira
+        for (const sel of addSelectors) {
+            const c = qs(document, sel);
+            if (c) { (c.closest('a, button, input[type="image"]') || c).click(); return true; }
+        }
+
+        // 3) Link ou botao com texto exatamente "+"
+        const plus = Array.from(document.querySelectorAll('a, button, input[type="submit"]')).find(
+            (el) => (el.textContent || '').trim() === '+' || (el.value || '').trim() === '+'
+        );
+        if (plus) { plus.click(); return true; }
+
+        return false;
+    }
+    """
+    try:
+        if page.evaluate(js):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+
+    selectors = [
+        "img[alt='+']",
+        "input[type='image'][alt='+']",
+        "a:has(img[alt='+'])",
+        "img[src*='plus' i]",
+        "img[src*='mais' i]",
+        "img[src*='add' i]",
+        "img[alt*='novo' i]",
+        "img[alt*='adicionar' i]",
+        "img[title*='novo' i]",
+        "a[title*='novo' i]",
+        "a[title*='adicionar' i]",
+        "input[value='+']",
+        "button:text-is('+')",
+        "a:text-is('+')",
+    ]
+    return _click_any_selector_any_scope(page, selectors)
 
 
 def _click_cell_action_by_header(row, header_key: str, prefer_arrow: bool = False) -> bool:
@@ -1642,6 +1675,19 @@ def _executar_fluxo_plano_aulas(page, contexto: ContextoPlano, registro: Sequenc
 
     if not _open_plano_aulas_for_context(page, contexto, logger=logger):
         raise LancamentoError(f"Nao foi possivel abrir Plano de Aulas para {contexto.escola} | {contexto.turno} | {contexto.turma}.")
+
+    # Debug: captura estado da pagina apos abrir Plano de Aulas.
+    try:
+        _dbg_dir = os.environ.get("SGE_DEBUG_DIR", "")
+        if _dbg_dir:
+            os.makedirs(_dbg_dir, exist_ok=True)
+            _turma_slug = _normalize(contexto.turma).replace(" ", "_")
+            page.screenshot(path=os.path.join(_dbg_dir, f"plano_aberto_{_turma_slug}.png"), full_page=True)
+            with open(os.path.join(_dbg_dir, f"plano_aberto_{_turma_slug}.html"), "w", encoding="utf-8") as _f:
+                _f.write(page.content())
+            _log(logger, f"[DEBUG] Screenshot pos-abertura salvo em {_dbg_dir}.")
+    except Exception as _exc:  # noqa: BLE001
+        _log(logger, f"[DEBUG] Falha ao salvar screenshot pos-abertura: {_exc}")
 
     if dry_run:
         return True, False, False
