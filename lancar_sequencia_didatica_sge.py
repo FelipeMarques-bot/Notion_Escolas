@@ -1695,6 +1695,13 @@ def executar_lancamento_sequencia(
     turma_input = _canon_turma_label(turma) or turma
     turma_refs = _parse_turma_referencias(referencias_turma)
 
+    if modo_rapido and not escola:
+        raise LancamentoError(
+            "No modo rapido (--modo-rapido) e obrigatorio especificar --escola (ex.: --escola Arapongas). "
+            "Sem escola definida, o sistema tenta descobrir contextos pelo Notion e obtem nomes invalidos "
+            "como 'Escola nao identificada', que nao funcionam no portal SGE."
+        )
+
     contextos: List[ContextoPlano] = []
     if modo_rapido and escola and turma:
         turnos = _turnos_por_escola(escola)
@@ -1789,6 +1796,28 @@ def executar_lancamento_sequencia(
 
     if not contextos:
         raise LancamentoError("Nenhum contexto de turma encontrado apos aplicar filtros/anos alvo.")
+
+    # Remove contextos com nomes invalidos gerados quando a hierarquia do Notion
+    # nao contem o nome da escola/turno de forma reconhecivel.
+    _INVALIDO = {"nao identificad", "nao identificado"}
+    def _ctx_valido(c: ContextoPlano) -> bool:
+        for campo in (c.escola, c.turno, c.turma, c.trimestre):
+            if any(inv in _normalize(campo) for inv in _INVALIDO):
+                return False
+        return True
+
+    invalidos = [c for c in contextos if not _ctx_valido(c)]
+    contextos = [c for c in contextos if _ctx_valido(c)]
+    if invalidos:
+        _log(logger, f"Aviso: {len(invalidos)} contexto(s) ignorado(s) com nome invalido (escola/turno nao identificado pelo Notion).")
+        for c in invalidos:
+            _log(logger, f"  Ignorado: {c.escola} | {c.turno} | {c.turma} | {c.trimestre}")
+
+    if not contextos:
+        raise LancamentoError(
+            "Todos os contextos descobertos tinham escola ou turno nao identificados. "
+            "Especifique --escola e verifique se os databases de Notas estao compartilhados com a integracao no Notion."
+        )
 
     resumo = ExecucaoResumo(contextos_total=len(contextos))
 
