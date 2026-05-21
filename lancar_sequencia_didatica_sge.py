@@ -19,6 +19,7 @@ from lancar_notas_sge import (
     HEADLESS,
     NAV_TIMEOUT_MS,
     LancamentoError,
+    _capture_stage_debug,
     _click_any_selector_any_scope,
     _click_text_any_scope,
     _database_title,
@@ -986,7 +987,45 @@ def _download_pdf(url: str, name_hint: str) -> str:
 def _open_plano_aulas_for_context(page, contexto: ContextoPlano, logger=None) -> bool:
     _set_filters_on_portal(page, contexto, logger=logger)
 
-    turma_num = _extract_turma_number(contexto.turma)
+    # Debug: estado do portal imediatamente após tentativa de filtros.
+    _log(logger, f"[DEBUG] URL apos filtros: {page.url}")
+    _log(logger, f"[DEBUG] Frames disponiveis: {[f.url for f in page.frames]}")
+    _capture_stage_debug(page, "plano_aulas_pos_filtro", logger)
+
+    # Diagnóstico de linhas visíveis para entender a estrutura da página.
+    for fi, scope in enumerate(_iter_scopes(page)):
+        try:
+            all_rows = scope.locator("tr")
+            total_all = all_rows.count()
+            _log(logger, f"[DEBUG] scope[{fi}]: total tr={total_all}")
+            sample = []
+            for ri in range(min(total_all, 8)):
+                try:
+                    txt = (all_rows.nth(ri).inner_text(timeout=200) or "").strip()
+                    if txt:
+                        sample.append(txt[:120])
+                except Exception:  # noqa: BLE001
+                    pass
+            if sample:
+                _log(logger, f"[DEBUG] scope[{fi}] primeiras linhas: {sample}")
+            hidden = scope.locator("input[name^='W0019W0075_TURNUMSTR_'], input[name*='TURNUMSTR_']")
+            _log(logger, f"[DEBUG] scope[{fi}] TURNUMSTR inputs: {hidden.count()}")
+            # Listar todos os links do scope para identificar menus de módulo.
+            all_links = scope.locator("a")
+            link_count = all_links.count()
+            link_texts = []
+            for li in range(min(link_count, 30)):
+                try:
+                    t = (all_links.nth(li).inner_text(timeout=150) or "").strip()
+                    if t:
+                        link_texts.append(t[:60])
+                except Exception:  # noqa: BLE001
+                    pass
+            if link_texts:
+                _log(logger, f"[DEBUG] scope[{fi}] links: {link_texts}")
+        except Exception as exc:  # noqa: BLE001
+            _log(logger, f"[DEBUG] scope[{fi}] erro ao diagnosticar: {exc}")
+
     serie_num = _extract_first_number(contexto.turma)
     trimestre_num = _extract_first_number(contexto.trimestre)
     turno_norm = _normalize(contexto.turno).upper()
@@ -1237,6 +1276,8 @@ def _open_plano_aulas_for_context(page, contexto: ContextoPlano, logger=None) ->
         page.wait_for_timeout(700)
         return True
 
+    _log(logger, "[DEBUG] FALHA TOTAL: nenhuma estrategia encontrou Plano de Aulas.")
+    _capture_stage_debug(page, "plano_aulas_falha_total", logger)
     return False
 
 
