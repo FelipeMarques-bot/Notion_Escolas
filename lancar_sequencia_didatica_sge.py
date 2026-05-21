@@ -879,44 +879,86 @@ def _open_plano_aulas_for_context(page, contexto: ContextoPlano, logger=None) ->
     turma_num = _extract_turma_number(contexto.turma)
     trimestre_num = _extract_first_number(contexto.trimestre)
     turno_norm = _normalize(contexto.turno).upper()
+    turma_norm = _normalize(contexto.turma)
+
+    turma_suffix = ""
+    m_turma = re.search(r"\b([6-9])o\s*ano\s*(\d+)\b", turma_norm)
+    if m_turma:
+        turma_suffix = (m_turma.group(2) or "").strip()
+
+    def _matches_turma_label(norm: str) -> bool:
+        if not turma_num:
+            return True
+
+        num = re.escape(turma_num)
+        patterns = [
+            rf"\bturma\s*{num}\b",
+            rf"\b{num}o\s*ano\b",
+            rf"\b{num}\s*o\s*ano\b",
+        ]
+
+        if not any(re.search(p, norm) for p in patterns):
+            return False
+
+        # Quando a turma tiver sufixo (ex.: 6º Ano 1), exige o sufixo.
+        if turma_suffix and not re.search(rf"\b{re.escape(turma_suffix)}\b", norm):
+            return False
+
+        return True
 
     for scope in _iter_scopes(page):
-        hidden_rows = scope.locator("input[name^='W0019W0075_TURNUMSTR_']")
+        # Aguarda o grid responder ao filtro.
+        for _ in range(8):
+            hidden_rows = scope.locator("input[name^='W0019W0075_TURNUMSTR_']")
+            total = hidden_rows.count()
+            if total > 0:
+                break
+            page.wait_for_timeout(250)
+
         total = hidden_rows.count()
-        for idx in range(total):
-            cell = hidden_rows.nth(idx)
-            try:
-                label = (cell.input_value(timeout=400) or "").strip()
-            except Exception:  # noqa: BLE001
-                continue
-
-            norm = _normalize(label)
-            ok_turno = bool(turno_norm and _normalize(turno_norm) in norm)
-            ok_turma = True if not turma_num else bool(re.search(rf"\bturma\s*{re.escape(turma_num)}\b", norm))
-            ok_trim = bool(trimestre_num and f"{trimestre_num}o trimestre" in norm)
-            if not (ok_turno and ok_turma and ok_trim):
-                continue
-
-            name = (cell.get_attribute("name") or "")
-            suffix = name.rsplit("_", 1)[-1]
-            selectors = [
-                f"#W0019W0075_PLANOAULA_{suffix}",
-                f"img[name='W0019W0075_PLANOAULA_{suffix}']",
-                f"#W0019W0075_PLANODEAULA_{suffix}",
-                f"img[name='W0019W0075_PLANODEAULA_{suffix}']",
-                f"#W0019W0075_PLANOAULAS_{suffix}",
-                f"img[name='W0019W0075_PLANOAULAS_{suffix}']",
-            ]
-            for sel in selectors:
+        for strict_trim in (True, False):
+            for idx in range(total):
+                cell = hidden_rows.nth(idx)
                 try:
-                    icon = scope.locator(sel)
-                    if icon.count() == 0:
-                        continue
-                    icon.first.click(timeout=ACTION_TIMEOUT_MS)
-                    page.wait_for_timeout(800)
-                    return True
+                    label = (cell.input_value(timeout=400) or "").strip()
                 except Exception:  # noqa: BLE001
                     continue
+
+                norm = _normalize(label)
+                ok_turno = bool(turno_norm and _normalize(turno_norm) in norm)
+                ok_turma = _matches_turma_label(norm)
+
+                if strict_trim and trimestre_num:
+                    ok_trim = bool(f"{trimestre_num}o trimestre" in norm or ("trimestre" in norm and str(trimestre_num) in norm))
+                else:
+                    ok_trim = True
+
+                if not (ok_turno and ok_turma and ok_trim):
+                    continue
+
+                name = (cell.get_attribute("name") or "")
+                suffix = name.rsplit("_", 1)[-1]
+                selectors = [
+                    f"#W0019W0075_PLANOAULA_{suffix}",
+                    f"img[name='W0019W0075_PLANOAULA_{suffix}']",
+                    f"#W0019W0075_PLANODEAULA_{suffix}",
+                    f"img[name='W0019W0075_PLANODEAULA_{suffix}']",
+                    f"#W0019W0075_PLANOAULAS_{suffix}",
+                    f"img[name='W0019W0075_PLANOAULAS_{suffix}']",
+                    f"a[id*='PLANOAULA_{suffix}']",
+                    f"a[name*='PLANOAULA_{suffix}']",
+                ]
+                for sel in selectors:
+                    try:
+                        icon = scope.locator(sel)
+                        if icon.count() == 0:
+                            continue
+                        icon.first.click(timeout=ACTION_TIMEOUT_MS)
+                        page.wait_for_timeout(800)
+                        _log(logger, f"Plano de Aulas aberto pela linha: {label}")
+                        return True
+                    except Exception:  # noqa: BLE001
+                        continue
 
     # Fallback do print: abrir via menu de rodape.
     if _click_text_any_scope(page, "Plano de Aulas"):
