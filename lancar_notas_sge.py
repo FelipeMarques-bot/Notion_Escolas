@@ -1599,6 +1599,8 @@ def _set_filters_on_portal(page, contexto: ContextoTurma, logger: Optional[LogFn
     turma = _extract_turma_number(contexto.turma)
     turno = _turno_code(contexto.turno)
 
+    _log(logger, f"Aplicando filtros no portal: etapa={etapa or '-'} turno={turno} turma={turma or '(todas)'}")
+
     for scope in _iter_scopes(page):
         try:
             etapa_sel = scope.locator("select[name='W0019_SECNUMFILTRODISC']")
@@ -1611,7 +1613,9 @@ def _set_filters_on_portal(page, contexto: ContextoTurma, logger: Optional[LogFn
 
             turma_in = scope.locator("input[name='W0019_TURNUMFILTRODISC']")
             if turma_in.count() > 0:
-                turma_in.first.fill(turma or "0")
+                # Quando nao ha numero explicito de turma (ex.: "6º Ano"),
+                # manter em branco para nao filtrar indevidamente por "0".
+                turma_in.first.fill(turma or "")
 
             if _click_any_selector_any_scope(
                 page,
