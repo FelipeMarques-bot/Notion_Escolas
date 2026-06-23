@@ -63,6 +63,51 @@ DEFAULT_ESCOLAS_DATABASE_IDS = [
 
 SEQUENCIAS_DB_TITLE = "sequencias didaticas - pdfs"
 
+# Mapeamento fixo de turmas por ano. Cada chave eh um valor possivel da
+# coluna "Ano" na database de Sequencias. Cada valor eh a lista de
+# (escola, turno, turma) que devem receber o lancamento.
+# Atualize aqui quando a estrutura de escolas mudar.
+TURMAS_POR_ANO: Dict[str, List[Tuple[str, str, str]]] = {
+    "6º Ano": [
+        ("Juvenal", "Matutino", "6º Ano"),
+        ("Arapongas", "Vespertino", "6º Ano"),
+        ("Mulde", "Matutino", "6º Ano"),
+        ("Anna Alves", "Vespertino", "6º Ano"),
+        ("Tancredo", "Matutino", "6º Ano"),
+        ("Tancredo", "Vespertino", "6º Ano"),
+        ("Maria Helena", "Matutino", "6º Ano"),
+        ("Maria Helena", "Vespertino", "6º Ano"),
+    ],
+    "7º Ano": [
+        ("Juvenal", "Matutino", "7º Ano"),
+        ("Arapongas", "Vespertino", "7º Ano"),
+        ("Mulde", "Matutino", "7º Ano"),
+        ("Anna Alves", "Vespertino", "7º Ano"),
+        ("Tancredo", "Matutino", "7º Ano"),
+        ("Tancredo", "Vespertino", "7º Ano"),
+        ("Maria Helena", "Matutino", "7º Ano"),
+        ("Maria Helena", "Vespertino", "7º Ano"),
+    ],
+    "8º Ano": [
+        ("Juvenal", "Matutino", "8º Ano"),
+        ("Arapongas", "Vespertino", "8º Ano"),
+        ("Mulde", "Matutino", "8º Ano"),
+        ("Anna Alves", "Vespertino", "8º Ano"),
+        ("Tancredo", "Matutino", "8º Ano"),
+        ("Tancredo", "Vespertino", "8º Ano"),
+        ("Maria Helena", "Vespertino", "8º Ano"),
+    ],
+    "9º Ano": [
+        ("Juvenal", "Matutino", "9º Ano"),
+        ("Arapongas", "Vespertino", "9º Ano"),
+        ("Mulde", "Matutino", "9º Ano"),
+        ("Anna Alves", "Vespertino", "9º Ano"),
+        ("Tancredo", "Matutino", "9º Ano"),
+        ("Tancredo", "Vespertino", "9º Ano"),
+        ("Maria Helena", "Vespertino", "9º Ano"),
+    ],
+}
+
 
 @dataclass
 class SequenciaRegistro:
@@ -285,6 +330,8 @@ def _load_sequencias_from_notion(logger=None) -> List[SequenciaRegistro]:
         if not ano:
             continue
 
+        # Escola, Turno e Turma NAO sao mais obrigatorios: o mapeamento
+        # fixo TURMAS_POR_ANO expande cada linha nos contextos corretos.
         escola = _extract_select_or_text(props, ["Escola"])
         turno = _extract_select_or_text(props, ["Turno"])
         turma = _extract_select_or_text(props, ["Turma"])
@@ -353,9 +400,6 @@ def _load_sequencias_from_notion(logger=None) -> List[SequenciaRegistro]:
 
         # Log detalhado do que faltou (ajuda a diagnosticar schema do Notion).
         missing = []
-        if not escola: missing.append("Escola")
-        if not turno: missing.append("Turno")
-        if not turma: missing.append("Turma")
         if not titulo_documento: missing.append("Titulo Documento")
         if not arquivo_url: missing.append("Arquivo PDF (sem URL)")
         if not periodo_inicio: missing.append("Periodo inicio")
@@ -398,23 +442,41 @@ def _gerar_contextos_de_sequencias(
     registros: List["SequenciaRegistro"],
     logger=None,
 ) -> List["ContextoPlano"]:
-    """Constroi contextos diretamente das linhas da database de Sequencias.
+    """Constroi contextos a partir do mapeamento fixo TURMAS_POR_ANO.
 
-    Cada linha da database ja traz (Escola, Turno, Turma, Trimestre).
-    Sem varrer raiz do Notion, sem ler databases de notas, sem permissao
-    em paginas de escola.
+    Cada linha de registro (vinda da database de Sequencias) tem um
+    'ano' (ex.: '6o Ano'). Para cada linha, expande em N contextos
+    (escola, turno, turma) usando a tabela hardcoded TURMAS_POR_ANO.
+
+    Isso NAO percorre o Notion - tudo vem do codigo. Sem permissao
+    em paginas de escola ou databases de notas.
+
+    Se TURMAS_POR_ANO nao tiver chave para o ano da linha, a linha
+    eh pulada com aviso.
     """
     contextos: List[ContextoPlano] = []
     for r in registros:
-        contextos.append(
-            ContextoPlano(
-                escola=r.escola,
-                turno=r.turno,
-                turma=r.turma,
-                trimestre="",  # preenchido depois a partir do CLI
+        # Tenta match exato e normalizado.
+        chave = None
+        for k in TURMAS_POR_ANO.keys():
+            if _normalize(k) == _normalize(r.ano):
+                chave = k
+                break
+        if not chave:
+            _log(logger, f"[contexto] Linha '{r.titulo_documento}' (ano='{r.ano}'): ano sem mapeamento em TURMAS_POR_ANO. Pulada.")
+            continue
+        turmas = TURMAS_POR_ANO[chave]
+        _log(logger, f"[contexto] Linha '{r.titulo_documento}' (ano={r.ano}): expandindo em {len(turmas)} turma(s).")
+        for escola, turno, turma in turmas:
+            contextos.append(
+                ContextoPlano(
+                    escola=escola,
+                    turno=turno,
+                    turma=turma,
+                    trimestre="",  # preenchido depois a partir do CLI
+                )
             )
-        )
-    _log(logger, f"[contexto] {len(contextos)} contexto(s) gerado(s) direto da database de Sequencias.")
+    _log(logger, f"[contexto] Total de contextos gerados: {len(contextos)}.")
     return contextos
 
 
