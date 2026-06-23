@@ -131,14 +131,48 @@ def _first_file_from_prop(prop: Dict) -> Tuple[str, str]:
 
 
 def _extract_date_property(props: Dict, names: List[str]) -> str:
+    """Extrai a PRIMEIRA data de uma propriedade.
+
+    Aceita tipo 'date' (ISO) ou 'rich_text'/'title' com texto livre no
+    formato 'dd/mm a dd/mm' (devolve o inicio) ou 'dd/mm/yyyy' unico.
+    """
     for name in names:
         prop = props.get(name, {})
-        if prop.get("type") != "date":
+        if not prop:
             continue
-        node = prop.get("date") or {}
-        start = (node.get("start") or "").strip()
-        if start:
-            return _fmt_date_ddmmyyyy(start)
+
+        if prop.get("type") == "date":
+            node = prop.get("date") or {}
+            start = (node.get("start") or "").strip()
+            if start:
+                return _fmt_date_ddmmyyyy(start)
+
+        # Fallback: rich_text / title / select com texto livre.
+        text = _extract_plain_text(prop).strip()
+        if text:
+            # Padrao "dd/mm(/yyyy)? (a|ate|to|-|/) dd/mm(/yyyy)?" -> inicio
+            m = re.match(
+                r"(\d{1,2})/(\d{1,2})(?:/(\d{4}))?\s*(?:a|ate|to|-|/)\s*(\d{1,2})/(\d{1,2})(?:/(\d{4}))?",
+                text,
+            )
+            if m:
+                d1, mo1, y1, _d2, _mo2, _y2 = m.groups()
+                year = int(y1) if y1 else datetime.now().year
+                try:
+                    dt = datetime.strptime(f"{int(d1):02d}/{int(mo1):02d}/{year}", "%d/%m/%Y")
+                    return dt.strftime("%d/%m/%Y")
+                except ValueError:
+                    pass
+
+            # Padrao "dd/mm/yyyy" unico.
+            m2 = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})", text)
+            if m2:
+                d, mo, y = m2.groups()
+                try:
+                    dt = datetime.strptime(f"{int(d):02d}/{int(mo):02d}/{y}", "%d/%m/%Y")
+                    return dt.strftime("%d/%m/%Y")
+                except ValueError:
+                    pass
     return ""
 
 
@@ -252,17 +286,61 @@ def _load_sequencias_from_notion(logger=None) -> List[SequenciaRegistro]:
         periodo_fim = _extract_date_property(props, ["Periodo fim", "Período fim", "Periodo", "Período"])
 
         # Se a propriedade Periodo for unica (date com start/end), reusa end.
+        # Se for rich_text "dd/mm a dd/mm", extrai a segunda data como fim.
         if not periodo_fim:
             periodo_unico = props.get("Periodo", {}) or props.get("Período", {})
-            if periodo_unico.get("type") == "date":
+            ptype = periodo_unico.get("type")
+            if ptype == "date":
                 node = periodo_unico.get("date") or {}
                 end = (node.get("end") or "").strip()
                 if end:
                     periodo_fim = _fmt_date_ddmmyyyy(end)
+            elif ptype in ("rich_text", "title"):
+                texto = _extract_plain_text(periodo_unico).strip()
+                if texto:
+                    # Acha 2 datas dd(/mm(/yyyy)) com separador entre elas.
+                    pattern = re.compile(r"(\d{1,2})/(\d{1,2})(?:/(\d{4}))?")
+                    datas = []
+                    for m in pattern.finditer(texto):
+                        if datas:
+                            gap = texto[datas[-1].end():m.start()]
+                            if not re.search(r"\s|[-/]|ate|to|a ", gap, re.IGNORECASE):
+                                continue
+                        datas.append(m)
+                    if len(datas) >= 2:
+                        last = datas[-1]
+                        d, mo, y = last.group(1), last.group(2), last.group(3)
+                        year = int(y) if y else datetime.now().year
+                        try:
+                            dt = datetime.strptime(f"{int(d):02d}/{int(mo):02d}/{year}", "%d/%m/%Y")
+                            periodo_fim = dt.strftime("%d/%m/%Y")
+                        except ValueError:
+                            pass
 
         n_aulas = _extract_number_property(props, ["N aulas", "Nº aulas", "Numero de aulas"])
 
-        if not titulo_documento or not arquivo_url or not periodo_inicio or not periodo_fim or n_aulas <= 0:
+        # Fallback: se N aulas nao estiver preenchido, calcular dias corridos
+        # entre inicio e fim (formula conservadora: 1 aula por dia).
+        if n_aulas <= 0 and periodo_inicio and periodo_fim:
+            try:
+                di = datetime.strptime(periodo_inicio, "%d/%m/%Y")
+                df = datetime.strptime(periodo_fim, "%d/%m/%Y")
+                diff = (df - di).days + 1
+                if diff > 0:
+                    n_aulas = diff
+                    _log(logger, f"Linha '{titulo_linha or '(sem titulo)'}': N aulas ausente, usando {n_aulas} (dias corridos).")
+            except ValueError:
+                pass
+
+        # Log detalhado do que faltou (ajuda a diagnosticar schema do Notion).
+        missing = []
+        if not titulo_documento: missing.append("Titulo Documento")
+        if not arquivo_url: missing.append("Arquivo PDF (sem URL)")
+        if not periodo_inicio: missing.append("Periodo inicio")
+        if not periodo_fim: missing.append("Periodo fim")
+        if n_aulas <= 0: missing.append("N aulas")
+        if missing:
+            _log(logger, f"Linha '{titulo_linha or '(sem titulo)'}' ignorada. Faltando: {', '.join(missing)}.")
             continue
 
         result.append(
