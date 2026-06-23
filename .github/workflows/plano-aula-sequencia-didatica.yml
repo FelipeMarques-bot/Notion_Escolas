@@ -53,6 +53,17 @@ on:
           - "1º Trimestre"
           - "2º Trimestre"
           - "3º Trimestre"
+      ano:
+        description: Ano alvo (opcional, vazio = todos com template)
+        required: false
+        default: "Todos"
+        type: choice
+        options:
+          - "Todos"
+          - "6º Ano"
+          - "7º Ano"
+          - "8º Ano"
+          - "9º Ano"
       modo_execucao:
         description: Estratégia de execução planejada
         required: true
@@ -155,6 +166,7 @@ jobs:
           INPUT_DATA_INICIO: ${{ github.event.inputs.data_inicio }}
           INPUT_DATA_FIM: ${{ github.event.inputs.data_fim }}
           INPUT_TRIMESTRE: ${{ github.event.inputs.trimestre }}
+          INPUT_ANO: ${{ github.event.inputs.ano }}
           INPUT_ARQ_6: ${{ github.event.inputs.arquivo_6_ano }}
           INPUT_ARQ_7: ${{ github.event.inputs.arquivo_7_ano }}
           INPUT_ARQ_8: ${{ github.event.inputs.arquivo_8_ano }}
@@ -168,6 +180,7 @@ jobs:
           if [[ -n "$INPUT_ESCOLA" && "$INPUT_ESCOLA" != "Todas" ]]; then ARGS+=("--escola" "$INPUT_ESCOLA"); fi
           if [[ -n "$INPUT_MODO" ]]; then ARGS+=("--modo-execucao" "$INPUT_MODO"); fi
           if [[ -n "$INPUT_TRIMESTRE" ]]; then ARGS+=("--trimestre" "$INPUT_TRIMESTRE"); fi
+          if [[ -n "$INPUT_ANO" && "$INPUT_ANO" != "Todos" ]]; then ARGS+=("--ano" "$INPUT_ANO"); fi
           if [[ -n "$INPUT_DATA_INICIO" ]]; then ARGS+=("--data-inicio" "$INPUT_DATA_INICIO"); fi
           if [[ -n "$INPUT_DATA_FIM" ]]; then ARGS+=("--data-fim" "$INPUT_DATA_FIM"); fi
           if [[ -n "$INPUT_ARQ_6" ]]; then ARGS+=("--arquivo-6-ano" "$INPUT_ARQ_6"); fi

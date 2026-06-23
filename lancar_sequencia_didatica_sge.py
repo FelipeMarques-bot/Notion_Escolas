@@ -936,6 +936,7 @@ def executar_lancamento_sequencia(
     data_inicio: str = "",
     data_fim: str = "",
     arquivo_por_ano: Optional[Dict[str, str]] = None,
+    ano: str = "",
     logger=print,
 ) -> ExecucaoResumo:
     cpf = _resolve_env_credential(SGE_CPF, "SGE_CPF", logger=logger, digits_only=True)
@@ -952,6 +953,36 @@ def executar_lancamento_sequencia(
 
     if not contextos:
         raise LancamentoError("Nenhum contexto de turma encontrado para executar Plano de Aulas.")
+
+    # Filtra contextos cujo ano nao tem template cadastrado no Notion
+    # de Sequencias (evita processar 8o Ano quando so ha template de 6o).
+    anos_disponiveis = {_normalize(r.ano) for r in registros if r.ano}
+    _log(logger, f"Anos com template de sequencia: {sorted(anos_disponiveis)}")
+
+    # Filtro explicito por ano (CLI --ano) tem prioridade sobre o conjunto.
+    if ano and _normalize(ano) not in {"", "todos"}:
+        anos_disponiveis = {a for a in anos_disponiveis if a == _normalize(ano)}
+        _log(logger, f"Filtro por ano aplicado: {ano}. Anos efetivos: {sorted(anos_disponiveis)}")
+
+    contextos_filtrados = []
+    pulados = 0
+    for ctx in contextos:
+        ano_ctx = _normalize(_ano_from_turma(ctx.turma))
+        if anos_disponiveis and ano_ctx not in anos_disponiveis:
+            pulados += 1
+            _log(logger, f"Pulado (sem template): {ctx.escola} | {ctx.turno} | {ctx.turma}.")
+            continue
+        contextos_filtrados.append(ctx)
+
+    if not contextos_filtrados:
+        msg = f"Nenhum contexto com template de sequencia. Disponiveis: {sorted(anos_disponiveis)}."
+        if dry_run:
+            _log(logger, f"DRY-RUN: {msg} Nada a fazer.")
+            return ExecucaoResumo(contextos_total=len(contextos))
+        raise LancamentoError(msg)
+
+    contextos = contextos_filtrados
+    _log(logger, f"Contextos apos filtro por template: {len(contextos)} (pulados: {pulados}).")
 
     if modo_execucao == "por_turma_em_todas_as_escolas":
         contextos = sorted(contextos, key=lambda c: (_ano_from_turma(c.turma), _normalize(c.turma), _normalize(c.escola), _normalize(c.turno)))
@@ -1017,6 +1048,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Lanca sequencia didatica (Plano de Aulas) no SGE")
     parser.add_argument("--escola", default="")
     parser.add_argument("--trimestre", default="2º Trimestre")
+    parser.add_argument("--ano", default="", help="Filtra por ano (ex.: '6º Ano'). Vazio = todos com template.")
     parser.add_argument("--modo-execucao", default="por_escola", choices=["por_escola", "por_turma_em_todas_as_escolas"])
     parser.add_argument("--data-inicio", default="")
     parser.add_argument("--data-fim", default="")
@@ -1047,6 +1079,7 @@ def main() -> int:
             data_inicio=args.data_inicio,
             data_fim=args.data_fim,
             arquivo_por_ano=arquivo_por_ano,
+            ano=args.ano,
             logger=print,
         )
     except Exception as exc:  # noqa: BLE001
