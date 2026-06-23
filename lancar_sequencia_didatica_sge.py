@@ -404,25 +404,36 @@ def _gerar_contextos_de_sequencias(
         try:
             db_solic = _safe_notion_call(lambda: notion.databases.retrieve(database_id=db_id))
         except Exception as exc:  # noqa: BLE001
-            _log(logger, f"Aviso: nao consegui ler database de solicitacoes {db_id}: {exc}")
+            _log(logger, f"[acesso] Falha ao ler database de solicitacoes {db_id[:8]}...: {exc}")
             continue
 
         parent = db_solic.get("parent", {}) or {}
         if parent.get("type") != "page_id":
-            _log(logger, f"Aviso: parent da database {db_id} nao eh page_id ({parent.get('type')}).")
+            _log(logger, f"[acesso] Database {db_id[:8]}... tem parent tipo '{parent.get('type')}', esperado 'page_id'. Escola ignorada.")
             continue
         escola_page_id = parent.get("page_id") or ""
         if not escola_page_id:
+            _log(logger, f"[acesso] Database {db_id[:8]}... sem parent.page_id. Escola ignorada.")
             continue
 
+        # Titulo da database de solicitacao para identificar a escola no log.
+        solic_title = _database_title(db_solic) or db_id[:8]
+
         # Lista databases filhas da pagina da escola.
-        children = _list_children(notion, escola_page_id)
+        try:
+            children = _list_children(notion, escola_page_id)
+        except Exception as exc:  # noqa: BLE001
+            _log(logger, f"[acesso] Falha ao listar filhas da pagina {escola_page_id[:8]}... (escola={solic_title}): {exc}")
+            continue
+
+        db_notas_encontradas = 0
         for child in children:
             if child.get("type") != "child_database":
                 continue
             title = (child.get("child_database", {}) or {}).get("title", "").strip()
             if not _is_notas_database(title):
                 continue
+            db_notas_encontradas += 1
             ctx = _infer_context([title])
             if "nao identificado" in ctx.turno.lower() or "nao identificado" in ctx.turma.lower():
                 continue
@@ -437,6 +448,8 @@ def _gerar_contextos_de_sequencias(
                     trimestre=ctx.trimestre,
                 )
             )
+
+        _log(logger, f"[acesso] Escola '{solic_title}' (page={escola_page_id[:8]}...): {db_notas_encontradas} database(s) de notas encontrada(s).")
 
     # Dedup por (escola, turno, turma, trimestre).
     seen = set()
