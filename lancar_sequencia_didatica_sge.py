@@ -42,6 +42,9 @@ NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "")
 ROOT_PAGE_ID = os.environ.get("ROOT_PAGE_ID", "")
 SGE_CPF = os.environ.get("SGE_CPF", "")
 SGE_SENHA = os.environ.get("SGE_SENHA", "")
+# ID opcional da database "Sequencias Didaticas - PDFs". Quando definido,
+# o script le direto por ID (sem depender de permissao na raiz do Notion).
+SEQUENCIAS_DATABASE_ID = os.environ.get("SEQUENCIAS_DATABASE_ID", "").strip()
 
 SEQUENCIAS_DB_TITLE = "sequencias didaticas - pdfs"
 
@@ -184,23 +187,38 @@ def _load_sequencias_from_notion(logger=None) -> List[SequenciaRegistro]:
 
     if not NOTION_TOKEN or not root_page_id:
         raise LancamentoError("Defina NOTION_TOKEN e ROOT_PAGE_ID nas variaveis de ambiente.")
-    if _is_placeholder_env(NOTION_TOKEN) or _is_placeholder_env(ROOT_PAGE_ID):
+    if _is_placeholder_env(NOTION_TOKEN) or _is_placeholder_env(root_page_id):
         raise LancamentoError("NOTION_TOKEN/ROOT_PAGE_ID estao com placeholders. Atualize com valores reais.")
 
     notion = Client(auth=NOTION_TOKEN)
-    databases = _discover_databases(notion, root_page_id, logger=logger)
 
-    alvo_id = ""
-    for db_id, _, db_title in databases:
-        title_norm = _normalize(db_title)
-        if title_norm == SEQUENCIAS_DB_TITLE or SEQUENCIAS_DB_TITLE in title_norm:
-            alvo_id = db_id
-            break
+    # Caminho preferencial: ler a database direto por ID (independe de
+    # permissao em paginas ancestrais).
+    alvo_id = _normalize_notion_id(SEQUENCIAS_DATABASE_ID) if SEQUENCIAS_DATABASE_ID else ""
 
-    if not alvo_id:
-        raise LancamentoError("Database 'Sequencias Didaticas - PDFs' nao encontrada no Notion.")
+    if alvo_id:
+        _log(logger, f"Usando SEQUENCIAS_DATABASE_ID direto: {alvo_id}")
+        try:
+            db_obj = _safe_notion_call(lambda: notion.databases.retrieve(database_id=alvo_id))
+        except Exception as exc:  # noqa: BLE001
+            raise LancamentoError(
+                f"Falha ao acessar database de Sequencias Didaticas por ID direto ({alvo_id}): {exc}"
+            )
+    else:
+        # Fallback: descoberta recursiva a partir da raiz.
+        databases = _discover_databases(notion, root_page_id, logger=logger)
 
-    db_obj = _safe_notion_call(lambda: notion.databases.retrieve(database_id=alvo_id))
+        for db_id, _, db_title in databases:
+            title_norm = _normalize(db_title)
+            if title_norm == SEQUENCIAS_DB_TITLE or SEQUENCIAS_DB_TITLE in title_norm:
+                alvo_id = db_id
+                break
+
+        if not alvo_id:
+            raise LancamentoError("Database 'Sequencias Didaticas - PDFs' nao encontrada no Notion.")
+
+        db_obj = _safe_notion_call(lambda: notion.databases.retrieve(database_id=alvo_id))
+
     title = _database_title(db_obj)
     _log(logger, f"Database de sequencias identificada: {title}")
 

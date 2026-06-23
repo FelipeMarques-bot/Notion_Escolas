@@ -119,6 +119,7 @@ jobs:
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           ROOT_PAGE_ID: ${{ secrets.ROOT_PAGE_ID }}
+          SEQUENCIAS_DATABASE_ID: ${{ secrets.SEQUENCIAS_DATABASE_ID }}
           SGE_CPF: ${{ secrets.SGE_CPF }}
           SGE_SENHA: ${{ secrets.SGE_SENHA }}
         run: |
@@ -133,10 +134,15 @@ jobs:
             exit 1
           fi
 
+          if [ -z "$SEQUENCIAS_DATABASE_ID" ]; then
+            echo "Aviso: SEQUENCIAS_DATABASE_ID nao definido. Caindo no modo descoberta (pode falhar se a integracao nao tiver permissao na raiz do Notion)."
+          fi
+
       - name: Executar lancamento de sequencia didatica
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           ROOT_PAGE_ID: ${{ secrets.ROOT_PAGE_ID }}
+          SEQUENCIAS_DATABASE_ID: ${{ secrets.SEQUENCIAS_DATABASE_ID }}
           SGE_CPF: ${{ secrets.SGE_CPF }}
           SGE_SENHA: ${{ secrets.SGE_SENHA }}
           SGE_LOGIN_URL: ${{ secrets.SGE_LOGIN_URL }}

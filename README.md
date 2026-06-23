@@ -30,6 +30,19 @@ Em Settings > Secrets and variables > Actions:
 - SGE_SENHA
 - SGE_LOGIN_URL (opcional)
 
+### Secret adicional para Sequencia Didatica
+
+O workflow `Plano de Aula - Sequencia Didatica` aceita uma secret extra:
+
+- SEQUENCIAS_DATABASE_ID (recomendado)
+
+Exemplo de valor: `383db7e871644613804539dcb69f6a1a`
+
+Quando definida, o script le a database `Sequencias Didaticas - PDFs`
+diretamente por ID, sem depender de permissao na pagina raiz apontada
+por ROOT_PAGE_ID. Sem essa secret, o script cai na descoberta recursiva
+(mais lenta e exige acesso de leitura a paginas ancestrais).
+
 ## Instalacao local (opcional)
 
 ```bash
