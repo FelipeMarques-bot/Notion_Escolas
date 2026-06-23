@@ -390,66 +390,119 @@ def _gerar_contextos_de_sequencias(
     anos_alvo: set,
     logger=None,
 ) -> List["ContextoPlano"]:
-    """Le databases de NOTAS filhas das 6 escolas e gera contextos.
+    """Le databases de NOTAS diretamente (sem depender de pagina-pai).
 
-    Para cada ID em DEFAULT_ESCOLAS_DATABASE_IDS (que aponta pra database
-    de SOLICITACOES de uma escola), pega a pagina-pai da escola via
-    `parent.page_id` e lista databases filhas com titulo comecando por
-    'notas escolas -'. Extrai (turno, turma, trimestre) do titulo de cada
-    database de notas e filtra apenas as que batem com `anos_alvo`.
+    Estrategia: lista databases recursivamente a partir do SEQUENCIAS_DATABASE_ID
+    e filtra apenas as que tem titulo 'notas escolas - ...'. Isso funciona mesmo
+    quando a integracao nao tem permissao na raiz 'Escolas' mas tem acesso as
+    databases de notas (que sao filhas de paginas de escola).
+
+    Para cada database de notas, extrai (escola, turno, turma, trimestre) do
+    titulo via _infer_context e filtra apenas contextos cujo ano esta em
+    `anos_alvo`.
     """
     contextos: List[ContextoPlano] = []
 
-    for db_id in _escolas_database_ids():
+    if not SEQUENCIAS_DATABASE_ID:
+        _log(logger, "[acesso] SEQUENCIAS_DATABASE_ID nao definido; impossivel descobrir databases de notas.")
+        return contextos
+
+    try:
+        db_seq = _safe_notion_call(lambda: notion.databases.retrieve(database_id=SEQUENCIAS_DATABASE_ID))
+    except Exception as exc:  # noqa: BLE001
+        _log(logger, f"[acesso] Falha ao ler SEQUENCIAS_DATABASE_ID: {exc}")
+        return contextos
+
+    parent = db_seq.get("parent", {}) or {}
+    if parent.get("type") != "page_id":
+        _log(logger, f"[acesso] Parent de SEQUENCIAS_DATABASE_ID nao eh page_id ({parent.get('type')}).")
+        return contextos
+    seq_page_id = parent.get("page_id") or ""
+    if not seq_page_id:
+        _log(logger, "[acesso] SEQUENCIAS_DATABASE_ID sem parent.page_id.")
+        return contextos
+
+    # A pagina-pai da database de Sequencias eh a raiz 'Escolas'.
+    # Lista filhos dessa pagina para achar databases de notas e paginas de escola.
+    _log(logger, f"[acesso] Listando filhos da raiz 'Escolas' (page={seq_page_id[:8]}...) ...")
+    try:
+        children = _list_children(notion, seq_page_id)
+    except Exception as exc:  # noqa: BLE001
+        _log(logger, f"[acesso] Falha ao listar filhos da raiz 'Escolas' (page={seq_page_id[:8]}...): {exc}")
+        return contextos
+
+    # Passo 1: pegar IDs das paginas de escola (filtrar por nome).
+    escolas_conhecidas = {
+        "juvenal", "arapongas", "mulde", "anna alves", "tancredo", "maria helena",
+    }
+    escola_page_ids: Dict[str, str] = {}
+    db_notas_directas: List[Dict] = []
+    db_notas_por_page: Dict[str, List[Dict]] = {}
+
+    for child in children:
+        ctype = child.get("type")
+        title = ""
+        cid = child.get("id", "")
+        if ctype == "child_page":
+            title = (child.get("child_page", {}) or {}).get("title", "").strip()
+            norm_title = _normalize(title)
+            for esc in escolas_conhecidas:
+                if _normalize(esc) in norm_title:
+                    escola_page_ids[esc] = cid
+                    break
+        elif ctype == "child_database":
+            db_title = (child.get("child_database", {}) or {}).get("title", "").strip()
+            if _is_notas_database(db_title):
+                db_notas_directas.append({"id": cid, "title": db_title})
+
+    _log(logger, f"[acesso] Paginas de escola encontradas: {sorted(escola_page_ids)}.")
+    _log(logger, f"[acesso] Databases de notas diretamente na raiz: {len(db_notas_directas)}.")
+
+    # Passo 2: listar databases de notas filhas de cada pagina de escola.
+    for esc, page_id in escola_page_ids.items():
         try:
-            db_solic = _safe_notion_call(lambda: notion.databases.retrieve(database_id=db_id))
+            esc_children = _list_children(notion, page_id)
         except Exception as exc:  # noqa: BLE001
-            _log(logger, f"[acesso] Falha ao ler database de solicitacoes {db_id[:8]}...: {exc}")
+            _log(logger, f"[acesso] Falha ao listar filhos da pagina '{esc}' (page={page_id[:8]}...): {exc}")
             continue
+        count = 0
+        for c in esc_children:
+            if c.get("type") != "child_database":
+                continue
+            ct = (c.get("child_database", {}) or {}).get("title", "").strip()
+            if _is_notas_database(ct):
+                db_notas_por_page.setdefault(esc, []).append({"id": c.get("id", ""), "title": ct})
+                count += 1
+        _log(logger, f"[acesso] Escola '{esc}' (page={page_id[:8]}...): {count} database(s) de notas encontrada(s).")
 
-        parent = db_solic.get("parent", {}) or {}
-        if parent.get("type") != "page_id":
-            _log(logger, f"[acesso] Database {db_id[:8]}... tem parent tipo '{parent.get('type')}', esperado 'page_id'. Escola ignorada.")
+    # Combina: databases diretas (se houver) + databases filhas das escolas.
+    all_db_notas: List[Dict] = list(db_notas_directas)
+    for esc, lst in db_notas_por_page.items():
+        all_db_notas.extend(lst)
+
+    if not all_db_notas:
+        _log(logger, "[acesso] Nenhuma database de notas encontrada em lugar nenhum. Verifique permissoes.")
+        return contextos
+
+    _log(logger, f"[acesso] Total de databases de notas a processar: {len(all_db_notas)}.")
+
+    # Passo 3: extrair contextos das databases de notas.
+    for db in all_db_notas:
+        title = db.get("title", "")
+        ctx = _infer_context([title])
+        if "nao identificado" in ctx.turno.lower() or "nao identificado" in ctx.turma.lower():
             continue
-        escola_page_id = parent.get("page_id") or ""
-        if not escola_page_id:
-            _log(logger, f"[acesso] Database {db_id[:8]}... sem parent.page_id. Escola ignorada.")
+        ano_ctx = _normalize(_ano_from_turma(ctx.turma))
+        if anos_alvo and ano_ctx not in anos_alvo:
             continue
-
-        # Titulo da database de solicitacao para identificar a escola no log.
-        solic_title = _database_title(db_solic) or db_id[:8]
-
-        # Lista databases filhas da pagina da escola.
-        try:
-            children = _list_children(notion, escola_page_id)
-        except Exception as exc:  # noqa: BLE001
-            _log(logger, f"[acesso] Falha ao listar filhas da pagina {escola_page_id[:8]}... (escola={solic_title}): {exc}")
-            continue
-
-        db_notas_encontradas = 0
-        for child in children:
-            if child.get("type") != "child_database":
-                continue
-            title = (child.get("child_database", {}) or {}).get("title", "").strip()
-            if not _is_notas_database(title):
-                continue
-            db_notas_encontradas += 1
-            ctx = _infer_context([title])
-            if "nao identificado" in ctx.turno.lower() or "nao identificado" in ctx.turma.lower():
-                continue
-            ano_ctx = _normalize(_ano_from_turma(ctx.turma))
-            if anos_alvo and ano_ctx not in anos_alvo:
-                continue
-            contextos.append(
-                ContextoPlano(
-                    escola=ctx.escola,
-                    turno=ctx.turno,
-                    turma=ctx.turma,
-                    trimestre=ctx.trimestre,
-                )
+        contextos.append(
+            ContextoPlano(
+                escola=ctx.escola,
+                turno=ctx.turno,
+                turma=ctx.turma,
+                trimestre=ctx.trimestre,
             )
-
-        _log(logger, f"[acesso] Escola '{solic_title}' (page={escola_page_id[:8]}...): {db_notas_encontradas} database(s) de notas encontrada(s).")
+        )
 
     # Dedup por (escola, turno, turma, trimestre).
     seen = set()
