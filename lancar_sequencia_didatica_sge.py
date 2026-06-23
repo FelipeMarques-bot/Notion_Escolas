@@ -23,9 +23,12 @@ from lancar_notas_sge import (
     _extract_first_number,
     _extract_plain_text,
     _extract_turma_number,
+    _infer_context,
     _is_non_empty,
+    _is_notas_database,
     _is_placeholder_env,
     _iter_scopes,
+    _list_children,
     _login_sge,
     _normalize,
     _normalize_cpf_for_sge,
@@ -35,7 +38,6 @@ from lancar_notas_sge import (
     _safe_notion_call,
     _set_filters_on_portal,
     _turno_code,
-    listar_contextos_disponiveis,
 )
 
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "")
@@ -45,6 +47,19 @@ SGE_SENHA = os.environ.get("SGE_SENHA", "")
 # ID opcional da database "Sequencias Didaticas - PDFs". Quando definido,
 # o script le direto por ID (sem depender de permissao na raiz do Notion).
 SEQUENCIAS_DATABASE_ID = os.environ.get("SEQUENCIAS_DATABASE_ID", "").strip()
+# IDs das databases de SOLICITACOES das 6 escolas (mesmo formato do
+# processar_solicitacoes_github.py). Quando preenchido, o script le
+# apenas as databases de NOTAS filhas dessas escolas (sem varrer a raiz
+# do Notion inteira). Vazio = fallback para descoberta (mais lento).
+ESCOLAS_DATABASE_IDS_RAW = os.environ.get("ESCOLAS_DATABASE_IDS", "").strip()
+DEFAULT_ESCOLAS_DATABASE_IDS = [
+    "1bcc61e6-e3a8-493d-ad98-45ab49063103",  # Juvenal
+    "76179e56-f755-42a2-b5de-e0c56025bd7b",  # Arapongas
+    "fb5f3d25-4c2c-4ef9-93a4-2079b17e3bf2",  # Mulde
+    "19ac0fd7-442f-4f06-a43f-12de0c1fe396",  # Anna Alves
+    "c4eeb930-570e-4acc-a6e5-f6b02c1bd0fd",  # Tancredo
+    "ddb3cab5-70dc-4dcb-96c2-5b8e62fb9a57",  # Maria Helena
+]  # fmt: skip
 
 SEQUENCIAS_DB_TITLE = "sequencias didaticas - pdfs"
 
@@ -362,6 +377,77 @@ def _load_sequencias_from_notion(logger=None) -> List[SequenciaRegistro]:
 
     _log(logger, f"Registros de sequencia carregados do Notion: {len(result)}")
     return result
+
+
+def _escolas_database_ids() -> List[str]:
+    if not ESCOLAS_DATABASE_IDS_RAW:
+        return list(DEFAULT_ESCOLAS_DATABASE_IDS)
+    return [x.strip() for x in ESCOLAS_DATABASE_IDS_RAW.split(",") if x.strip()]
+
+
+def _gerar_contextos_de_sequencias(
+    notion: Client,
+    anos_alvo: set,
+    logger=None,
+) -> List["ContextoPlano"]:
+    """Le databases de NOTAS filhas das 6 escolas e gera contextos.
+
+    Para cada ID em DEFAULT_ESCOLAS_DATABASE_IDS (que aponta pra database
+    de SOLICITACOES de uma escola), pega a pagina-pai da escola via
+    `parent.page_id` e lista databases filhas com titulo comecando por
+    'notas escolas -'. Extrai (turno, turma, trimestre) do titulo de cada
+    database de notas e filtra apenas as que batem com `anos_alvo`.
+    """
+    contextos: List[ContextoPlano] = []
+
+    for db_id in _escolas_database_ids():
+        try:
+            db_solic = _safe_notion_call(lambda: notion.databases.retrieve(database_id=db_id))
+        except Exception as exc:  # noqa: BLE001
+            _log(logger, f"Aviso: nao consegui ler database de solicitacoes {db_id}: {exc}")
+            continue
+
+        parent = db_solic.get("parent", {}) or {}
+        if parent.get("type") != "page_id":
+            _log(logger, f"Aviso: parent da database {db_id} nao eh page_id ({parent.get('type')}).")
+            continue
+        escola_page_id = parent.get("page_id") or ""
+        if not escola_page_id:
+            continue
+
+        # Lista databases filhas da pagina da escola.
+        children = _list_children(notion, escola_page_id)
+        for child in children:
+            if child.get("type") != "child_database":
+                continue
+            title = (child.get("child_database", {}) or {}).get("title", "").strip()
+            if not _is_notas_database(title):
+                continue
+            ctx = _infer_context([title])
+            if "nao identificado" in ctx.turno.lower() or "nao identificado" in ctx.turma.lower():
+                continue
+            ano_ctx = _normalize(_ano_from_turma(ctx.turma))
+            if anos_alvo and ano_ctx not in anos_alvo:
+                continue
+            contextos.append(
+                ContextoPlano(
+                    escola=ctx.escola,
+                    turno=ctx.turno,
+                    turma=ctx.turma,
+                    trimestre=ctx.trimestre,
+                )
+            )
+
+    # Dedup por (escola, turno, turma, trimestre).
+    seen = set()
+    uniq: List[ContextoPlano] = []
+    for c in contextos:
+        key = (_normalize(c.escola), _normalize(c.turno), _normalize(c.turma), _normalize(c.trimestre))
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(c)
+    return uniq
 
 
 def _filter_contexts(contextos_raw: List[Dict[str, str]], escola: str, trimestre: str) -> List[ContextoPlano]:
@@ -949,13 +1035,8 @@ def executar_lancamento_sequencia(
         raise LancamentoError("SGE_CPF/SGE_SENHA estao com placeholders. Atualize com valores reais.")
 
     registros = _load_sequencias_from_notion(logger=logger)
-    contextos = _filter_contexts(listar_contextos_disponiveis(logger=logger), escola=escola, trimestre=trimestre)
 
-    if not contextos:
-        raise LancamentoError("Nenhum contexto de turma encontrado para executar Plano de Aulas.")
-
-    # Filtra contextos cujo ano nao tem template cadastrado no Notion
-    # de Sequencias (evita processar 8o Ano quando so ha template de 6o).
+    # Calcula anos disponiveis a partir dos registros de Sequencias.
     anos_disponiveis = {_normalize(r.ano) for r in registros if r.ano}
     _log(logger, f"Anos com template de sequencia: {sorted(anos_disponiveis)}")
 
@@ -964,25 +1045,32 @@ def executar_lancamento_sequencia(
         anos_disponiveis = {a for a in anos_disponiveis if a == _normalize(ano)}
         _log(logger, f"Filtro por ano aplicado: {ano}. Anos efetivos: {sorted(anos_disponiveis)}")
 
-    contextos_filtrados = []
-    pulados = 0
-    for ctx in contextos:
-        ano_ctx = _normalize(_ano_from_turma(ctx.turma))
-        if anos_disponiveis and ano_ctx not in anos_disponiveis:
-            pulados += 1
-            _log(logger, f"Pulado (sem template): {ctx.escola} | {ctx.turno} | {ctx.turma}.")
-            continue
-        contextos_filtrados.append(ctx)
+    # Gera contextos a partir das databases de NOTAS filhas das 6 escolas
+    # (sem varrer a raiz do Notion). Cruza com os anos disponiveis.
+    notion = Client(auth=NOTION_TOKEN)
+    contextos_raw = _gerar_contextos_de_sequencias(notion, anos_disponiveis, logger=logger)
+    contextos = _filter_contexts(
+        [
+            {"escola": c.escola, "turno": c.turno, "turma": c.turma, "trimestre": c.trimestre}
+            for c in contextos_raw
+        ],
+        escola=escola,
+        trimestre=trimestre,
+    )
 
-    if not contextos_filtrados:
-        msg = f"Nenhum contexto com template de sequencia. Disponiveis: {sorted(anos_disponiveis)}."
+    if not contextos:
+        msg = (
+            "Nenhum contexto de turma encontrado para executar Plano de Aulas. "
+            f"Anos disponiveis: {sorted(anos_disponiveis)}. "
+            "Verifique se a database de Sequencias tem linhas ativas e se as databases "
+            "de notas filhas das escolas estao acessiveis."
+        )
         if dry_run:
             _log(logger, f"DRY-RUN: {msg} Nada a fazer.")
-            return ExecucaoResumo(contextos_total=len(contextos))
+            return ExecucaoResumo(contextos_total=0)
         raise LancamentoError(msg)
 
-    contextos = contextos_filtrados
-    _log(logger, f"Contextos apos filtro por template: {len(contextos)} (pulados: {pulados}).")
+    _log(logger, f"Total de contextos gerados: {len(contextos)}.")
 
     if modo_execucao == "por_turma_em_todas_as_escolas":
         contextos = sorted(contextos, key=lambda c: (_ano_from_turma(c.turma), _normalize(c.turma), _normalize(c.escola), _normalize(c.turno)))
