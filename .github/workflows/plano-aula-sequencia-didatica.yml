@@ -44,6 +44,15 @@ on:
           - "Anna Alves"
           - "Tancredo"
           - "Maria Helena"
+      trimestre:
+        description: Trimestre alvo
+        required: false
+        default: "2º Trimestre"
+        type: choice
+        options:
+          - "1º Trimestre"
+          - "2º Trimestre"
+          - "3º Trimestre"
       modo_execucao:
         description: Estratégia de execução planejada
         required: true
@@ -102,8 +111,8 @@ jobs:
           fi
 
           if [[ -z "$ARQ_6" && -z "$ARQ_7" && -z "$ARQ_8" && -z "$ARQ_9" ]]; then
-            echo "Erro: informe ao menos um nome de arquivo (6º, 7º, 8º ou 9º ano)."
-            exit 1
+            echo "Aviso: nenhum arquivo (6º/7º/8º/9º ano) foi informado. Prosseguindo mesmo assim."
+            echo "Aviso: o script vai usar o que estiver disponivel na database do Notion."
           fi
 
       - name: Validar secrets obrigatorios
@@ -139,6 +148,7 @@ jobs:
           INPUT_DRY_RUN: ${{ github.event.inputs.dry_run }}
           INPUT_DATA_INICIO: ${{ github.event.inputs.data_inicio }}
           INPUT_DATA_FIM: ${{ github.event.inputs.data_fim }}
+          INPUT_TRIMESTRE: ${{ github.event.inputs.trimestre }}
           INPUT_ARQ_6: ${{ github.event.inputs.arquivo_6_ano }}
           INPUT_ARQ_7: ${{ github.event.inputs.arquivo_7_ano }}
           INPUT_ARQ_8: ${{ github.event.inputs.arquivo_8_ano }}
@@ -151,6 +161,7 @@ jobs:
 
           if [[ -n "$INPUT_ESCOLA" && "$INPUT_ESCOLA" != "Todas" ]]; then ARGS+=("--escola" "$INPUT_ESCOLA"); fi
           if [[ -n "$INPUT_MODO" ]]; then ARGS+=("--modo-execucao" "$INPUT_MODO"); fi
+          if [[ -n "$INPUT_TRIMESTRE" ]]; then ARGS+=("--trimestre" "$INPUT_TRIMESTRE"); fi
           if [[ -n "$INPUT_DATA_INICIO" ]]; then ARGS+=("--data-inicio" "$INPUT_DATA_INICIO"); fi
           if [[ -n "$INPUT_DATA_FIM" ]]; then ARGS+=("--data-fim" "$INPUT_DATA_FIM"); fi
           if [[ -n "$INPUT_ARQ_6" ]]; then ARGS+=("--arquivo-6-ano" "$INPUT_ARQ_6"); fi
