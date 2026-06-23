@@ -348,40 +348,59 @@ def _load_sequencias_from_notion(logger=None) -> List[SequenciaRegistro]:
 
         arquivo_nome, arquivo_url = _first_file_from_prop(props.get("Arquivo PDF", {}))
 
-        periodo_inicio = _extract_date_property(props, ["Periodo inicio", "Período início", "Periodo", "Período"])
-        periodo_fim = _extract_date_property(props, ["Periodo fim", "Período fim", "Periodo", "Período"])
-
-        # Se a propriedade Periodo for unica (date com start/end), reusa end.
-        # Se for rich_text "dd/mm a dd/mm", extrai a segunda data como fim.
-        if not periodo_fim:
-            periodo_unico = props.get("Periodo", {}) or props.get("Período", {})
-            ptype = periodo_unico.get("type")
-            if ptype == "date":
-                node = periodo_unico.get("date") or {}
+        # Em vez de chamar _extract_date_property duas vezes (que retorna
+        # o mesmo inicio), le a coluna 'Periodo' (unica) uma vez e extrai
+        # inicio + fim do texto livre "dd/mm a dd/mm".
+        texto_periodo = ""
+        for nome in ["Periodo", "Período"]:
+            prop = props.get(nome, {})
+            if prop.get("type") in ("rich_text", "title"):
+                t = _extract_plain_text(prop).strip()
+                if t:
+                    texto_periodo = t
+                    break
+            elif prop.get("type") == "date":
+                node = prop.get("date") or {}
+                start = (node.get("start") or "").strip()
                 end = (node.get("end") or "").strip()
-                if end:
-                    periodo_fim = _fmt_date_ddmmyyyy(end)
-            elif ptype in ("rich_text", "title"):
-                texto = _extract_plain_text(periodo_unico).strip()
-                if texto:
-                    # Acha 2 datas dd(/mm(/yyyy)) com separador entre elas.
-                    pattern = re.compile(r"(\d{1,2})/(\d{1,2})(?:/(\d{4}))?")
-                    datas = []
-                    for m in pattern.finditer(texto):
-                        if datas:
-                            gap = texto[datas[-1].end():m.start()]
-                            if not re.search(r"\s|[-/]|ate|to|a ", gap, re.IGNORECASE):
-                                continue
-                        datas.append(m)
-                    if len(datas) >= 2:
-                        last = datas[-1]
-                        d, mo, y = last.group(1), last.group(2), last.group(3)
-                        year = int(y) if y else datetime.now().year
-                        try:
-                            dt = datetime.strptime(f"{int(d):02d}/{int(mo):02d}/{year}", "%d/%m/%Y")
-                            periodo_fim = dt.strftime("%d/%m/%Y")
-                        except ValueError:
-                            pass
+                if start:
+                    periodo_inicio = _fmt_date_ddmmyyyy(start)
+                    if end:
+                        periodo_fim = _fmt_date_ddmmyyyy(end)
+
+        if texto_periodo:
+            datas = []
+            pattern = re.compile(r"(\d{1,2})/(\d{1,2})(?:/(\d{4}))?")
+            for m in pattern.finditer(texto_periodo):
+                if datas:
+                    gap = texto_periodo[datas[-1].end():m.start()]
+                    if not re.search(r"\s|[-/]|ate|to|a ", gap, re.IGNORECASE):
+                        continue
+                datas.append(m)
+            if datas:
+                first = datas[0]
+                d, mo, y = first.group(1), first.group(2), first.group(3)
+                year = int(y) if y else datetime.now().year
+                try:
+                    dt = datetime.strptime(f"{int(d):02d}/{int(mo):02d}/{year}", "%d/%m/%Y")
+                    periodo_inicio = dt.strftime("%d/%m/%Y")
+                except ValueError:
+                    pass
+            if len(datas) >= 2:
+                last = datas[-1]
+                d, mo, y = last.group(1), last.group(2), last.group(3)
+                year = int(y) if y else datetime.now().year
+                try:
+                    dt = datetime.strptime(f"{int(d):02d}/{int(mo):02d}/{year}", "%d/%m/%Y")
+                    periodo_fim = dt.strftime("%d/%m/%Y")
+                except ValueError:
+                    pass
+
+        # Se nao pegou Periodo unico mas tem colunas separadas, usa elas.
+        if not periodo_inicio:
+            periodo_inicio = _extract_date_property(props, ["Periodo inicio", "Período início"])
+        if not periodo_fim:
+            periodo_fim = _extract_date_property(props, ["Periodo fim", "Período fim"])
 
         n_aulas = _extract_number_property(props, ["N aulas", "Nº aulas", "Numero de aulas"])
 
@@ -481,6 +500,12 @@ def _gerar_contextos_de_sequencias(
 
 
 def _filter_contexts(contextos_raw: List[Dict[str, str]], escola: str, trimestre: str) -> List[ContextoPlano]:
+    """Filtra contextos por escola e trimestre vindos do CLI.
+
+    Quando `trimestre` do CLI nao bater com o do contexto (vazio),
+    considera como match (ja que trimestres vazios serao preenchidos
+    depois pelo CLI em executar_lancamento_sequencia).
+    """
     filtered: List[ContextoPlano] = []
     for item in contextos_raw:
         ctx = ContextoPlano(
@@ -489,9 +514,9 @@ def _filter_contexts(contextos_raw: List[Dict[str, str]], escola: str, trimestre
             turma=item.get("turma", ""),
             trimestre=item.get("trimestre", ""),
         )
-        if escola and _normalize(ctx.escola) != _normalize(escola):
+        if escola and _normalize(escola) not in {"", "todas"} and _normalize(ctx.escola) != _normalize(escola):
             continue
-        if trimestre and _normalize(ctx.trimestre) != _normalize(trimestre):
+        if trimestre and ctx.trimestre and _normalize(ctx.trimestre) != _normalize(trimestre):
             continue
         filtered.append(ctx)
     return filtered
