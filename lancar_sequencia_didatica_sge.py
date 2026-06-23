@@ -69,6 +69,8 @@ class SequenciaRegistro:
     page_id: str
     ano: str
     escola: str
+    turno: str
+    turma: str
     titulo_documento: str
     arquivo_nome: str
     arquivo_url: str
@@ -284,6 +286,8 @@ def _load_sequencias_from_notion(logger=None) -> List[SequenciaRegistro]:
             continue
 
         escola = _extract_select_or_text(props, ["Escola"])
+        turno = _extract_select_or_text(props, ["Turno"])
+        turma = _extract_select_or_text(props, ["Turma"])
         titulo_documento = _extract_select_or_text(props, ["Titulo Documento", "Título Documento"])
 
         titulo_linha = ""
@@ -349,6 +353,9 @@ def _load_sequencias_from_notion(logger=None) -> List[SequenciaRegistro]:
 
         # Log detalhado do que faltou (ajuda a diagnosticar schema do Notion).
         missing = []
+        if not escola: missing.append("Escola")
+        if not turno: missing.append("Turno")
+        if not turma: missing.append("Turma")
         if not titulo_documento: missing.append("Titulo Documento")
         if not arquivo_url: missing.append("Arquivo PDF (sem URL)")
         if not periodo_inicio: missing.append("Periodo inicio")
@@ -363,6 +370,8 @@ def _load_sequencias_from_notion(logger=None) -> List[SequenciaRegistro]:
                 page_id=row.get("id", ""),
                 ano=ano,
                 escola=escola,
+                turno=turno,
+                turma=turma,
                 titulo_documento=titulo_documento,
                 arquivo_nome=arquivo_nome,
                 arquivo_url=arquivo_url,
@@ -386,134 +395,27 @@ def _escolas_database_ids() -> List[str]:
 
 
 def _gerar_contextos_de_sequencias(
-    notion: Client,
-    anos_alvo: set,
+    registros: List["SequenciaRegistro"],
     logger=None,
 ) -> List["ContextoPlano"]:
-    """Le databases de NOTAS diretamente (sem depender de pagina-pai).
+    """Constroi contextos diretamente das linhas da database de Sequencias.
 
-    Estrategia: lista databases recursivamente a partir do SEQUENCIAS_DATABASE_ID
-    e filtra apenas as que tem titulo 'notas escolas - ...'. Isso funciona mesmo
-    quando a integracao nao tem permissao na raiz 'Escolas' mas tem acesso as
-    databases de notas (que sao filhas de paginas de escola).
-
-    Para cada database de notas, extrai (escola, turno, turma, trimestre) do
-    titulo via _infer_context e filtra apenas contextos cujo ano esta em
-    `anos_alvo`.
+    Cada linha da database ja traz (Escola, Turno, Turma, Trimestre).
+    Sem varrer raiz do Notion, sem ler databases de notas, sem permissao
+    em paginas de escola.
     """
     contextos: List[ContextoPlano] = []
-
-    if not SEQUENCIAS_DATABASE_ID:
-        _log(logger, "[acesso] SEQUENCIAS_DATABASE_ID nao definido; impossivel descobrir databases de notas.")
-        return contextos
-
-    try:
-        db_seq = _safe_notion_call(lambda: notion.databases.retrieve(database_id=SEQUENCIAS_DATABASE_ID))
-    except Exception as exc:  # noqa: BLE001
-        _log(logger, f"[acesso] Falha ao ler SEQUENCIAS_DATABASE_ID: {exc}")
-        return contextos
-
-    parent = db_seq.get("parent", {}) or {}
-    if parent.get("type") != "page_id":
-        _log(logger, f"[acesso] Parent de SEQUENCIAS_DATABASE_ID nao eh page_id ({parent.get('type')}).")
-        return contextos
-    seq_page_id = parent.get("page_id") or ""
-    if not seq_page_id:
-        _log(logger, "[acesso] SEQUENCIAS_DATABASE_ID sem parent.page_id.")
-        return contextos
-
-    # A pagina-pai da database de Sequencias eh a raiz 'Escolas'.
-    # Lista filhos dessa pagina para achar databases de notas e paginas de escola.
-    _log(logger, f"[acesso] Listando filhos da raiz 'Escolas' (page={seq_page_id[:8]}...) ...")
-    try:
-        children = _list_children(notion, seq_page_id)
-    except Exception as exc:  # noqa: BLE001
-        _log(logger, f"[acesso] Falha ao listar filhos da raiz 'Escolas' (page={seq_page_id[:8]}...): {exc}")
-        return contextos
-
-    # Passo 1: pegar IDs das paginas de escola (filtrar por nome).
-    escolas_conhecidas = {
-        "juvenal", "arapongas", "mulde", "anna alves", "tancredo", "maria helena",
-    }
-    escola_page_ids: Dict[str, str] = {}
-    db_notas_directas: List[Dict] = []
-    db_notas_por_page: Dict[str, List[Dict]] = {}
-
-    for child in children:
-        ctype = child.get("type")
-        title = ""
-        cid = child.get("id", "")
-        if ctype == "child_page":
-            title = (child.get("child_page", {}) or {}).get("title", "").strip()
-            norm_title = _normalize(title)
-            for esc in escolas_conhecidas:
-                if _normalize(esc) in norm_title:
-                    escola_page_ids[esc] = cid
-                    break
-        elif ctype == "child_database":
-            db_title = (child.get("child_database", {}) or {}).get("title", "").strip()
-            if _is_notas_database(db_title):
-                db_notas_directas.append({"id": cid, "title": db_title})
-
-    _log(logger, f"[acesso] Paginas de escola encontradas: {sorted(escola_page_ids)}.")
-    _log(logger, f"[acesso] Databases de notas diretamente na raiz: {len(db_notas_directas)}.")
-
-    # Passo 2: listar databases de notas filhas de cada pagina de escola.
-    for esc, page_id in escola_page_ids.items():
-        try:
-            esc_children = _list_children(notion, page_id)
-        except Exception as exc:  # noqa: BLE001
-            _log(logger, f"[acesso] Falha ao listar filhos da pagina '{esc}' (page={page_id[:8]}...): {exc}")
-            continue
-        count = 0
-        for c in esc_children:
-            if c.get("type") != "child_database":
-                continue
-            ct = (c.get("child_database", {}) or {}).get("title", "").strip()
-            if _is_notas_database(ct):
-                db_notas_por_page.setdefault(esc, []).append({"id": c.get("id", ""), "title": ct})
-                count += 1
-        _log(logger, f"[acesso] Escola '{esc}' (page={page_id[:8]}...): {count} database(s) de notas encontrada(s).")
-
-    # Combina: databases diretas (se houver) + databases filhas das escolas.
-    all_db_notas: List[Dict] = list(db_notas_directas)
-    for esc, lst in db_notas_por_page.items():
-        all_db_notas.extend(lst)
-
-    if not all_db_notas:
-        _log(logger, "[acesso] Nenhuma database de notas encontrada em lugar nenhum. Verifique permissoes.")
-        return contextos
-
-    _log(logger, f"[acesso] Total de databases de notas a processar: {len(all_db_notas)}.")
-
-    # Passo 3: extrair contextos das databases de notas.
-    for db in all_db_notas:
-        title = db.get("title", "")
-        ctx = _infer_context([title])
-        if "nao identificado" in ctx.turno.lower() or "nao identificado" in ctx.turma.lower():
-            continue
-        ano_ctx = _normalize(_ano_from_turma(ctx.turma))
-        if anos_alvo and ano_ctx not in anos_alvo:
-            continue
+    for r in registros:
         contextos.append(
             ContextoPlano(
-                escola=ctx.escola,
-                turno=ctx.turno,
-                turma=ctx.turma,
-                trimestre=ctx.trimestre,
+                escola=r.escola,
+                turno=r.turno,
+                turma=r.turma,
+                trimestre="",  # preenchido depois a partir do CLI
             )
         )
-
-    # Dedup por (escola, turno, turma, trimestre).
-    seen = set()
-    uniq: List[ContextoPlano] = []
-    for c in contextos:
-        key = (_normalize(c.escola), _normalize(c.turno), _normalize(c.turma), _normalize(c.trimestre))
-        if key in seen:
-            continue
-        seen.add(key)
-        uniq.append(c)
-    return uniq
+    _log(logger, f"[contexto] {len(contextos)} contexto(s) gerado(s) direto da database de Sequencias.")
+    return contextos
 
 
 def _filter_contexts(contextos_raw: List[Dict[str, str]], escola: str, trimestre: str) -> List[ContextoPlano]:
@@ -1102,19 +1004,25 @@ def executar_lancamento_sequencia(
 
     registros = _load_sequencias_from_notion(logger=logger)
 
-    # Calcula anos disponiveis a partir dos registros de Sequencias.
-    anos_disponiveis = {_normalize(r.ano) for r in registros if r.ano}
-    _log(logger, f"Anos com template de sequencia: {sorted(anos_disponiveis)}")
+    if not registros:
+        msg = "Nenhum registro ativo/valido encontrado na database de Sequencias."
+        if dry_run:
+            _log(logger, f"DRY-RUN: {msg} Nada a fazer.")
+            return ExecucaoResumo(contextos_total=0)
+        raise LancamentoError(msg)
 
-    # Filtro explicito por ano (CLI --ano) tem prioridade sobre o conjunto.
+    # Filtro explicito por ano (CLI --ano).
     if ano and _normalize(ano) not in {"", "todos"}:
-        anos_disponiveis = {a for a in anos_disponiveis if a == _normalize(ano)}
-        _log(logger, f"Filtro por ano aplicado: {ano}. Anos efetivos: {sorted(anos_disponiveis)}")
+        antes = len(registros)
+        registros = [r for r in registros if _normalize(r.ano) == _normalize(ano)]
+        _log(logger, f"Filtro --ano={ano}: {len(registros)}/{antes} registros.")
+    else:
+        _log(logger, f"Anos com template de sequencia: {sorted({_normalize(r.ano) for r in registros if r.ano})}")
 
-    # Gera contextos a partir das databases de NOTAS filhas das 6 escolas
-    # (sem varrer a raiz do Notion). Cruza com os anos disponiveis.
-    notion = Client(auth=NOTION_TOKEN)
-    contextos_raw = _gerar_contextos_de_sequencias(notion, anos_disponiveis, logger=logger)
+    # Constroi contextos direto da database (cada linha = 1 contexto).
+    contextos_raw = _gerar_contextos_de_sequencias(registros, logger=logger)
+
+    # Aplica filtro de escola/trimestre vindos do CLI.
     contextos = _filter_contexts(
         [
             {"escola": c.escola, "turno": c.turno, "turma": c.turma, "trimestre": c.trimestre}
@@ -1124,19 +1032,22 @@ def executar_lancamento_sequencia(
         trimestre=trimestre,
     )
 
+    # Preenche trimestre do CLI nos contextos (ja que vem da database, nao do titulo).
+    for c in contextos:
+        if not c.trimestre:
+            c.trimestre = trimestre
+
     if not contextos:
         msg = (
-            "Nenhum contexto de turma encontrado para executar Plano de Aulas. "
-            f"Anos disponiveis: {sorted(anos_disponiveis)}. "
-            "Verifique se a database de Sequencias tem linhas ativas e se as databases "
-            "de notas filhas das escolas estao acessiveis."
+            f"Nenhum contexto valido. Registros lidos: {len(registros)}. "
+            "Verifique se cada linha da database tem Escola, Turno e Turma preenchidos."
         )
         if dry_run:
             _log(logger, f"DRY-RUN: {msg} Nada a fazer.")
             return ExecucaoResumo(contextos_total=0)
         raise LancamentoError(msg)
 
-    _log(logger, f"Total de contextos gerados: {len(contextos)}.")
+    _log(logger, f"Total de contextos a processar: {len(contextos)}.")
 
     if modo_execucao == "por_turma_em_todas_as_escolas":
         contextos = sorted(contextos, key=lambda c: (_ano_from_turma(c.turma), _normalize(c.turma), _normalize(c.escola), _normalize(c.turno)))
