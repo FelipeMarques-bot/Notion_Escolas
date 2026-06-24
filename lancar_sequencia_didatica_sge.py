@@ -534,6 +534,7 @@ def _pick_template_for_context(
         return None
 
     candidates = [r for r in registros if _normalize(r.ano) == _normalize(ano)]
+    _log(logger, f"[diag] Apos filtro por ano ('{ano}'): {len(candidates)} candidato(s).")
     if not candidates:
         return None
 
@@ -541,10 +542,15 @@ def _pick_template_for_context(
     with_school = [r for r in candidates if r.escola and _normalize(r.escola) == _normalize(contexto.escola)]
     if with_school:
         candidates = with_school
+        _log(logger, f"[diag] Apos filtro por escola ('{contexto.escola}'): {len(candidates)} candidato(s).")
     else:
         without_school = [r for r in candidates if not r.escola]
         if without_school:
             candidates = without_school
+            _log(logger, f"[diag] Sem match por escola; usando {len(candidates)} candidato(s) sem escola preenchida.")
+        else:
+            _log(logger, f"[diag] AVISO: escola preenchida no Notion mas nao bate com contexto ('{contexto.escola}').")
+            return None
 
     wanted_file = _norm_file_name(filename_by_ano.get(ano, ""))
     if wanted_file:
@@ -1158,6 +1164,19 @@ def executar_lancamento_sequencia(
         raise LancamentoError(msg)
 
     _log(logger, f"Total de contextos a processar: {len(contextos)}.")
+    _log(
+        logger,
+        f"[diag] Registros disponiveis para match: {len(registros)}. "
+        f"Primeiro registro: ano='{registros[0].ano}' escola='{registros[0].escola}' "
+        f"arquivo_nome='{registros[0].arquivo_nome}' "
+        f"titulo='{registros[0].titulo_documento}'."
+    )
+    _log(
+        logger,
+        f"[diag] filename_by_ano passado ao pick: " + ", ".join(
+            f"{k}='{v}'" for k, v in (arquivo_por_ano or {}).items()
+        ) + "."
+    )
 
     if modo_execucao == "por_turma_em_todas_as_escolas":
         contextos = sorted(contextos, key=lambda c: (_ano_from_turma(c.turma), _normalize(c.turma), _normalize(c.escola), _normalize(c.turno)))
