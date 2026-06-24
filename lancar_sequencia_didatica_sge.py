@@ -548,9 +548,32 @@ def _pick_template_for_context(
 
     wanted_file = _norm_file_name(filename_by_ano.get(ano, ""))
     if wanted_file:
-        exact_file = [r for r in candidates if _norm_file_name(r.arquivo_nome) == wanted_file]
-        if exact_file:
-            candidates = exact_file
+        # Match tolerante: o usuario passa o "prefixo comum" do PDF (ex.: "Sequencia didatica 8 - 22/06 a 17/07 - 6º"),
+        # e o nome real no Notion vem com sufixo (ex.: "... - 6º Ano.pdf"). Aceita:
+        #   1. match exato apos normalizar;
+        #   2. startswith em qualquer direcao (CLI eh prefixo do Notion, ou vice-versa);
+        #   3. ignorar sufixo " Ano.pdf" / ".pdf" antes de comparar.
+        def _file_matches(wanted: str, candidate: str) -> bool:
+            cand = _norm_file_name(candidate)
+            if not cand:
+                return False
+            # remove sufixos comuns de arquivo/ano
+            cand_stripped = re.sub(r"\s+ano\.pdf$", "", cand).rstrip()
+            cand_stripped = re.sub(r"\.pdf$", "", cand_stripped).rstrip()
+            wanted_stripped = re.sub(r"\s+ano\.pdf$", "", wanted).rstrip()
+            wanted_stripped = re.sub(r"\.pdf$", "", wanted_stripped).rstrip()
+            return (
+                cand == wanted
+                or cand_stripped == wanted
+                or cand == wanted_stripped
+                or cand_stripped == wanted_stripped
+                or cand.startswith(wanted)
+                or wanted.startswith(cand)
+            )
+
+        matched = [r for r in candidates if _file_matches(wanted_file, r.arquivo_nome)]
+        if matched:
+            candidates = matched
         else:
             return None
 
