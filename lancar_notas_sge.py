@@ -183,6 +183,9 @@ def _resolve_sge_login_url(logger: Optional[LogFn] = None) -> str:
     # Corrige esquema com apenas uma barra (https:/dominio).
     raw = re.sub(r"^(https?):/([^/])", r"\1://\2", raw, flags=re.IGNORECASE)
 
+    # Remove duplicacao de esquema (ex.: "https://https://...").
+    raw = re.sub(r"^(https?://)+", r"\1", raw, flags=re.IGNORECASE)
+
     if not re.match(r"^https?://", raw, flags=re.IGNORECASE):
         raw = f"https://{raw}"
 
@@ -190,6 +193,12 @@ def _resolve_sge_login_url(logger: Optional[LogFn] = None) -> str:
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         _log(logger, f"Aviso: SGE_LOGIN_URL invalida; usando padrao {DEFAULT_SGE_LOGIN_URL}")
         return DEFAULT_SGE_LOGIN_URL
+
+    # Remove // duplicado no path (ex.: "https://dominio.com//path").
+    path = re.sub(r"/{2,}", "/", parsed.path)
+    if path != parsed.path:
+        raw = parsed._replace(path=path).geturl()
+        _log(logger, f"Duplo // corrigido no path da URL de login: {raw}")
 
     return raw
 
@@ -1047,6 +1056,12 @@ def _pick_user_input(scope):
             "input[name*='usuario' i]",
             "input[id*='usuario' i]",
             "input[placeholder*='usuario' i]",
+            "input[name*='login' i]",
+            "input[id*='login' i]",
+            "input[placeholder*='login' i]",
+            "input[name*='user' i]",
+            "input[id*='user' i]",
+            "input[placeholder*='user' i]",
         ],
     )
     if direct is not None:
@@ -1213,6 +1228,7 @@ def _ensure_login_form_available(page, logger: Optional[LogFn]) -> None:
         try:
             page.locator("input[name='BUTTON1'][type='submit']").first.click(timeout=ACTION_TIMEOUT_MS)
             page.wait_for_load_state("domcontentloaded", timeout=NAV_TIMEOUT_MS)
+            page.wait_for_timeout(500)
         except Exception:  # noqa: BLE001
             pass
 
@@ -1227,11 +1243,18 @@ def _ensure_login_form_available(page, logger: Optional[LogFn]) -> None:
         _log(logger, f"Formulario de login nao encontrado em {page.url}; tentando {fallback_url}")
         try:
             page.goto(fallback_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+            page.wait_for_timeout(500)
         except Exception:  # noqa: BLE001
             continue
         _, cpf_input, senha_input = _find_login_inputs(page)
         if cpf_input is not None and senha_input is not None:
             return
+
+    _capture_login_debug(page, logger=logger)
+    raise LancamentoError(
+        f"Nao foi possivel encontrar formulario de login apos {len(PORTAL_LOGIN_FALLBACK_URLS)} fallbacks. "
+        f"URL atual: {page.url}"
+    )
 
 
 def _click_text(page, text: str) -> bool:
@@ -1343,26 +1366,13 @@ def _read_login_error_message(page) -> str:
     return ""
 
 
-def _login_sge(page, cpf: str, senha: str, logger: Optional[LogFn]) -> None:
+def _login_sge_with_retry(page, cpf: str, senha: str, logger: Optional[LogFn], attempt: int = 1) -> None:
     login_url = _resolve_sge_login_url(logger=logger)
     _log(logger, f"URL de login SGE resolvida: {login_url}")
-    _log(logger, "Abrindo pagina de login do SGE...")
+    _log(logger, f"Abrindo pagina de login do SGE (tentativa {attempt})...")
     page.goto(login_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
     _ensure_login_form_available(page, logger=logger)
     _dismiss_cookie_banner(page, logger=logger)
-
-    if MANUAL_LOGIN and os.environ.get("GITHUB_ACTIONS") != "true":
-        if HEADLESS:
-            raise LancamentoError("MANUAL_LOGIN=1 exige HEADLESS=0 para abrir o navegador.")
-        _log(
-            logger,
-            "MANUAL_LOGIN ativo: faça login manualmente no navegador aberto. O script continuara apos detectar autenticacao.",
-        )
-        if not _wait_for_manual_login(page, logger=logger):
-            _capture_stage_debug(page, stage="manual_login_timeout", logger=logger)
-            raise LancamentoError("Login manual nao concluido dentro do tempo limite.")
-        _log(logger, "Login manual detectado. Iniciando lancamento...")
-        return
 
     scope = None
     cpf_input = None
@@ -1375,7 +1385,6 @@ def _login_sge(page, cpf: str, senha: str, logger: Optional[LogFn]) -> None:
         page.wait_for_timeout(300)
 
     if cpf_input is None or senha_input is None or scope is None:
-        _capture_login_debug(page, logger=logger)
         raise LancamentoError(
             f"Nao foi possivel localizar os campos de login no SGE. URL atual: {page.url}"
         )
@@ -1433,7 +1442,6 @@ def _login_sge(page, cpf: str, senha: str, logger: Optional[LogFn]) -> None:
     try:
         page.wait_for_load_state("networkidle", timeout=NAV_TIMEOUT_MS)
     except PlaywrightTimeoutError:
-        # Alguns portais continuam com requests de longa duracao.
         pass
 
     page.wait_for_timeout(500)
@@ -1441,8 +1449,6 @@ def _login_sge(page, cpf: str, senha: str, logger: Optional[LogFn]) -> None:
     if _is_login_page(page):
         err = _read_login_error_message(page)
 
-        # SGE costuma normalizar senha para maiusculas no campo. Quando a
-        # credencial foi cadastrada assim, tentar uma segunda vez pode resolver.
         senha_upper = senha.upper()
         if "senha inval" in _normalize(err) and senha_upper != senha:
             _log(logger, "Senha invalida no primeiro envio; tentando novamente com senha em maiusculas...")
@@ -1491,6 +1497,49 @@ def _login_sge(page, cpf: str, senha: str, logger: Optional[LogFn]) -> None:
         raise LancamentoError(f"Falha no login do SGE: {detalhe}")
 
     _log(logger, "Login realizado. Iniciando lancamento...")
+
+
+def _login_sge(page, cpf: str, senha: str, logger: Optional[LogFn]) -> None:
+    if MANUAL_LOGIN and os.environ.get("GITHUB_ACTIONS") != "true":
+        login_url = _resolve_sge_login_url(logger=logger)
+        _log(logger, f"URL de login SGE resolvida: {login_url}")
+        _log(logger, "Abrindo pagina de login do SGE (modo manual)...")
+        page.goto(login_url, wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+        if HEADLESS:
+            raise LancamentoError("MANUAL_LOGIN=1 exige HEADLESS=0 para abrir o navegador.")
+        _log(
+            logger,
+            "MANUAL_LOGIN ativo: faça login manualmente no navegador aberto. O script continuara apos detectar autenticacao.",
+        )
+        if not _wait_for_manual_login(page, logger=logger):
+            _capture_stage_debug(page, stage="manual_login_timeout", logger=logger)
+            raise LancamentoError("Login manual nao concluido dentro do tempo limite.")
+        _log(logger, "Login manual detectado. Iniciando lancamento...")
+        return
+
+    max_attempts = 2
+    last_exception = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            _login_sge_with_retry(page, cpf=cpf, senha=senha, logger=logger, attempt=attempt)
+            return
+        except LancamentoError as exc:
+            last_exception = exc
+            error_msg = str(exc)
+            # Nao retenta se for erro de credencial (senha invalida).
+            if "senha inval" in _normalize(error_msg):
+                _log(logger, "Credencial invalida detectada; sem retentativa.")
+                raise
+            if attempt < max_attempts:
+                _log(logger, f"Tentativa {attempt} falhou: {exc}. Recarregando pagina para retentativa...")
+                _capture_stage_debug(page, stage=f"login_retry_{attempt}", logger=logger)
+                try:
+                    page.goto(_resolve_sge_login_url(logger=logger), wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+                except Exception:  # noqa: BLE001
+                    pass
+
+    _capture_stage_debug(page, stage="login_failed", logger=logger)
+    raise LancamentoError(f"Falha no login do SGE apos {max_attempts} tentativas: {last_exception}")
 
 
 def _select_context(page, contexto: ContextoTurma, logger: Optional[LogFn]) -> None:
