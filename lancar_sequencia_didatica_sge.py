@@ -528,6 +528,7 @@ def _pick_template_for_context(
     filename_by_ano: Dict[str, str],
     override_inicio: str,
     override_fim: str,
+    logger=None,
 ) -> Optional[SequenciaRegistro]:
     ano = _ano_from_turma(contexto.turma)
     if not ano:
@@ -1202,6 +1203,7 @@ def executar_lancamento_sequencia(
                 filename_by_ano=arquivo_por_ano or {},
                 override_inicio=_fmt_date_ddmmyyyy(data_inicio),
                 override_fim=_fmt_date_ddmmyyyy(data_fim),
+                logger=logger,
             )
 
             if not registro:
