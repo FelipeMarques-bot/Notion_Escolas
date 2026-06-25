@@ -140,6 +140,7 @@ class ExecucaoResumo:
     anexos_enviados: int = 0
     situacoes_ativadas: int = 0
     falhas: int = 0
+    falhas_detalhes: List[str] = None
 
 
 def _log(logger, msg: str) -> None:
@@ -1216,7 +1217,7 @@ def executar_lancamento_sequencia(
     else:
         contextos = sorted(contextos, key=lambda c: (_normalize(c.escola), _normalize(c.turno), _ano_from_turma(c.turma), _normalize(c.turma)))
 
-    resumo = ExecucaoResumo(contextos_total=len(contextos))
+    resumo = ExecucaoResumo(contextos_total=len(contextos), falhas_detalhes=[])
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=HEADLESS)
@@ -1227,23 +1228,26 @@ def executar_lancamento_sequencia(
         _login_sge(page, cpf=cpf, senha=senha, logger=logger)
 
         for idx, ctx in enumerate(contextos, start=1):
-            _log(logger, f"[{idx}/{len(contextos)}] Processando {ctx.escola} | {ctx.turno} | {ctx.turma} | {ctx.trimestre}")
-
-            registro = _pick_template_for_context(
-                registros,
-                contexto=ctx,
-                filename_by_ano=arquivo_por_ano or {},
-                override_inicio=_fmt_date_ddmmyyyy(data_inicio),
-                override_fim=_fmt_date_ddmmyyyy(data_fim),
-                logger=logger,
-            )
-
-            if not registro:
-                _log(logger, f"Aviso: nenhum template de sequencia encontrado para {ctx.turma} ({ctx.escola}).")
-                resumo.falhas += 1
-                continue
+            turma_label = f"{ctx.escola} | {ctx.turno} | {ctx.turma} | {ctx.trimestre}"
+            _log(logger, f"[{idx}/{len(contextos)}] Processando {turma_label}")
 
             try:
+                registro = _pick_template_for_context(
+                    registros,
+                    contexto=ctx,
+                    filename_by_ano=arquivo_por_ano or {},
+                    override_inicio=_fmt_date_ddmmyyyy(data_inicio),
+                    override_fim=_fmt_date_ddmmyyyy(data_fim),
+                    logger=logger,
+                )
+
+                if not registro:
+                    msg = f"Nenhum template de sequencia encontrado para {turma_label}"
+                    _log(logger, f"Aviso: {msg}.")
+                    resumo.falhas += 1
+                    resumo.falhas_detalhes.append(msg)
+                    continue
+
                 ok_plan, ok_anexo, ok_sit = _executar_fluxo_plano_aulas(
                     page,
                     contexto=ctx,
@@ -1258,16 +1262,31 @@ def executar_lancamento_sequencia(
                 if ok_sit:
                     resumo.situacoes_ativadas += 1
             except PlaywrightTimeoutError as exc:
+                msg = f"Timeout em {turma_label}: {exc}"
                 resumo.falhas += 1
-                _log(logger, f"Falha por timeout em {ctx.escola} | {ctx.turma}: {exc}")
+                resumo.falhas_detalhes.append(msg)
+                _log(logger, msg)
                 _click_inicio(page)
             except Exception as exc:  # noqa: BLE001
+                msg = f"Falha em {turma_label}: {exc}"
                 resumo.falhas += 1
-                _log(logger, f"Falha em {ctx.escola} | {ctx.turma}: {exc}")
+                resumo.falhas_detalhes.append(msg)
+                _log(logger, msg)
                 _click_inicio(page)
 
         context.close()
         browser.close()
+
+    _log(logger, "--- Resumo da execucao ---")
+    _log(logger, f"Contextos processados: {resumo.contextos_total}")
+    _log(logger, f"Planejamentos criados: {resumo.planejamentos_criados}")
+    _log(logger, f"Anexos enviados: {resumo.anexos_enviados}")
+    _log(logger, f"Situacoes ativadas: {resumo.situacoes_ativadas}")
+    _log(logger, f"Falhas: {resumo.falhas}")
+    if resumo.falhas_detalhes:
+        _log(logger, "Detalhes das falhas:")
+        for detail in resumo.falhas_detalhes:
+            _log(logger, f"  - {detail}")
 
     return resumo
 
@@ -1314,12 +1333,19 @@ def main() -> int:
         print(f"Erro: {exc}")
         return 1
 
-    print("Resumo sequencia didatica:")
-    print(f"- contextos_total: {resumo.contextos_total}")
-    print(f"- planejamentos_criados: {resumo.planejamentos_criados}")
-    print(f"- anexos_enviados: {resumo.anexos_enviados}")
-    print(f"- situacoes_ativadas: {resumo.situacoes_ativadas}")
-    print(f"- falhas: {resumo.falhas}")
+    print("--- Resumo sequencia didatica ---")
+    print(f"Contextos processados: {resumo.contextos_total}")
+    print(f"Planejamentos criados: {resumo.planejamentos_criados}")
+    print(f"Anexos enviados: {resumo.anexos_enviados}")
+    print(f"Situacoes ativadas: {resumo.situacoes_ativadas}")
+    print(f"Falhas: {resumo.falhas}")
+    if resumo.falhas_detalhes:
+        print("Detalhes das falhas:")
+        for detail in resumo.falhas_detalhes:
+            print(f"  - {detail}")
+    # dry-run: exit 0 mesmo com falhas (relatorio completo)
+    if args.dry_run:
+        return 0
     return 0 if resumo.falhas == 0 else 1
 
 
