@@ -2,6 +2,7 @@ import argparse
 import os
 import re
 import tempfile
+import unicodedata
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
@@ -152,7 +153,22 @@ def _ano_from_turma(turma: str) -> str:
 
 
 def _norm_file_name(name: str) -> str:
-    return re.sub(r"\s+", " ", (name or "").strip().lower())
+    text = (name or "").strip().lower()
+    text = re.sub(r"\s+", " ", text)
+    # Remove acentos para matching tolerante
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    return text
+
+
+def _normalize_match(s: str) -> str:
+    text = (s or "").strip().lower()
+    text = text.replace("º", "o").replace("°", "o").replace("ª", "a")
+    text = text.replace("/", " ").replace("-", " ").replace("_", " ")
+    text = re.sub(r"\s+", " ", text)
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    return text.strip()
 
 
 def _fmt_date_ddmmyyyy(value: str) -> str:
@@ -537,6 +553,7 @@ def _pick_template_for_context(
     candidates = [r for r in registros if _normalize(r.ano) == _normalize(ano)]
     _log(logger, f"[diag] Apos filtro por ano ('{ano}'): {len(candidates)} candidato(s).")
     if not candidates:
+        _log(logger, f"[diag] Nenhum registro com ano '{ano}'. Anos disponiveis: {sorted({_normalize(r.ano) for r in registros if r.ano})}")
         return None
 
     # Prioriza linha da escola quando preenchida na database.
@@ -544,6 +561,8 @@ def _pick_template_for_context(
     if with_school:
         candidates = with_school
         _log(logger, f"[diag] Apos filtro por escola ('{contexto.escola}'): {len(candidates)} candidato(s).")
+    elif not contexto.escola:
+        _log(logger, "[diag] Contexto sem escola definida; mantendo todos os candidatos do ano.")
     else:
         without_school = [r for r in candidates if not r.escola]
         if without_school:
@@ -551,20 +570,17 @@ def _pick_template_for_context(
             _log(logger, f"[diag] Sem match por escola; usando {len(candidates)} candidato(s) sem escola preenchida.")
         else:
             _log(logger, f"[diag] AVISO: escola preenchida no Notion mas nao bate com contexto ('{contexto.escola}').")
+            _log(logger, f"[diag] Escolas disponiveis nos candidatos: {sorted({r.escola for r in candidates if r.escola})}")
             return None
 
     wanted_file = _norm_file_name(filename_by_ano.get(ano, ""))
     if wanted_file:
-        # Match tolerante: o usuario passa o "prefixo comum" do PDF (ex.: "Sequencia didatica 8 - 22/06 a 17/07 - 6º"),
-        # e o nome real no Notion vem com sufixo (ex.: "... - 6º Ano.pdf"). Aceita:
-        #   1. match exato apos normalizar;
-        #   2. startswith em qualquer direcao (CLI eh prefixo do Notion, ou vice-versa);
-        #   3. ignorar sufixo " Ano.pdf" / ".pdf" antes de comparar.
+        _log(logger, f"[diag] Buscando arquivo '{wanted_file}' entre {len(candidates)} candidato(s).")
+
         def _file_matches(wanted: str, candidate: str) -> bool:
             cand = _norm_file_name(candidate)
             if not cand:
                 return False
-            # remove sufixos comuns de arquivo/ano
             cand_stripped = re.sub(r"\s+ano\.pdf$", "", cand).rstrip()
             cand_stripped = re.sub(r"\.pdf$", "", cand_stripped).rstrip()
             wanted_stripped = re.sub(r"\s+ano\.pdf$", "", wanted).rstrip()
@@ -581,10 +597,26 @@ def _pick_template_for_context(
         matched = [r for r in candidates if _file_matches(wanted_file, r.arquivo_nome)]
         if matched:
             candidates = matched
+            _log(logger, f"[diag] Match por nome de arquivo: {len(candidates)} candidato(s).")
         else:
-            return None
+            # Fallback: tentar match por titulo do documento.
+            _log(logger, f"[diag] Nenhum match de arquivo. Nomes disponiveis: {[r.arquivo_nome for r in candidates]}")
+            wanted_title = _normalize_match(filename_by_ano.get(ano, ""))
+            title_matched = [
+                r for r in candidates
+                if wanted_title and _normalize_match(r.titulo_documento) == wanted_title
+            ]
+            if title_matched:
+                candidates = title_matched
+                _log(logger, f"[diag] Fallback match por titulo: {len(candidates)} candidato(s).")
+            else:
+                _log(logger, f"[diag] Titulos disponiveis: {[r.titulo_documento for r in candidates]}")
+                _log(logger, "[diag] Sem match por arquivo ou titulo; retornando primeiro candidato disponivel.")
+                # Retorna o primeiro candidato do ano+escola sem filtro de arquivo.
 
     chosen = candidates[0]
+    _log(logger, f"[diag] Registro escolhido: ano='{chosen.ano}' escola='{chosen.escola}' "
+                 f"arquivo='{chosen.arquivo_nome}' titulo='{chosen.titulo_documento}'")
     return SequenciaRegistro(
         page_id=chosen.page_id,
         ano=chosen.ano,
