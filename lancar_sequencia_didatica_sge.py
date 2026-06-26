@@ -656,6 +656,18 @@ def _download_pdf(url: str, name_hint: str) -> str:
 
 def _open_plano_aulas_for_context(page, contexto: ContextoPlano, logger=None) -> bool:
     _select_context(page, contexto, logger=logger)
+
+    # Navega para a pagina de Plano de Aulas
+    if not _click_any_selector_any_scope(page, [
+        "a[onclick*='PLANOAULA' i]",
+        "img[alt*='Plano de Aulas' i]",
+        "a:has(img[alt*='Plano de Aulas' i])",
+        "input[type='image'][alt*='Plano de Aulas' i]",
+        "*:has-text('Plano de Aulas')",
+    ]):
+        page.goto("https://www.sge8147.com.br/hportalplanejamentoaula.aspx", wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+
+    page.wait_for_timeout(1000)
     _set_filters_on_portal(page, contexto, logger=logger)
 
     turma_num = _extract_turma_number(contexto.turma)
@@ -700,21 +712,7 @@ def _open_plano_aulas_for_context(page, contexto: ContextoPlano, logger=None) ->
                 except Exception:  # noqa: BLE001
                     continue
 
-    # Fallback do print: abrir via menu de rodape.
-    if _click_text_any_scope(page, "Plano de Aulas"):
-        page.wait_for_timeout(700)
-        return True
-
-    debug_dir = os.environ.get("SGE_DEBUG_DIR", "artifacts/sge-login")
-    os.makedirs(debug_dir, exist_ok=True)
-    try:
-        page.screenshot(path=os.path.join(debug_dir, "plano_aulas_not_found.png"), full_page=True)
-        with open(os.path.join(debug_dir, "plano_aulas_page.html"), "w", encoding="utf-8") as f:
-            f.write(page.content())
-    except Exception:
-        pass
-
-    return False
+    return True
 
 
 def _set_periodo_and_aulas(page, data_inicio: str, data_fim: str, n_aulas: int) -> bool:
