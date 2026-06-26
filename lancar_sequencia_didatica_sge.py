@@ -1,6 +1,7 @@
 import argparse
 import os
 import re
+
 import tempfile
 import unicodedata
 import urllib.request
@@ -37,6 +38,7 @@ from lancar_notas_sge import (
     _query_database_rows,
     _resolve_env_credential,
     _safe_notion_call,
+    _select_context,
     _set_filters_on_portal,
     _turno_code,
 )
@@ -622,6 +624,8 @@ def _pick_template_for_context(
         page_id=chosen.page_id,
         ano=chosen.ano,
         escola=chosen.escola,
+        turno=chosen.turno or contexto.turno,
+        turma=chosen.turma or contexto.turma,
         titulo_documento=chosen.titulo_documento,
         arquivo_nome=chosen.arquivo_nome,
         arquivo_url=chosen.arquivo_url,
@@ -651,6 +655,7 @@ def _download_pdf(url: str, name_hint: str) -> str:
 
 
 def _open_plano_aulas_for_context(page, contexto: ContextoPlano, logger=None) -> bool:
+    _select_context(page, contexto, logger=logger)
     _set_filters_on_portal(page, contexto, logger=logger)
 
     turma_num = _extract_turma_number(contexto.turma)
@@ -699,6 +704,15 @@ def _open_plano_aulas_for_context(page, contexto: ContextoPlano, logger=None) ->
     if _click_text_any_scope(page, "Plano de Aulas"):
         page.wait_for_timeout(700)
         return True
+
+    debug_dir = os.environ.get("SGE_DEBUG_DIR", "artifacts/sge-login")
+    os.makedirs(debug_dir, exist_ok=True)
+    try:
+        page.screenshot(path=os.path.join(debug_dir, "plano_aulas_not_found.png"), full_page=True)
+        with open(os.path.join(debug_dir, "plano_aulas_page.html"), "w", encoding="utf-8") as f:
+            f.write(page.content())
+    except Exception:
+        pass
 
     return False
 
