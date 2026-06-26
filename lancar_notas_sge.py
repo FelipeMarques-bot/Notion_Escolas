@@ -618,6 +618,8 @@ def _extract_plain_text(prop: Dict) -> str:
                 elif item_type == "rich_text":
                     parts.append("".join(x.get("plain_text", "") for x in item.get("rich_text", [])))
             return " ".join(x for x in parts if x)
+    if ptype == "url":
+        return prop.get("url", "") or ""
     return ""
 
 
@@ -1559,6 +1561,11 @@ def _extract_first_number(text: str) -> str:
 
 def _extract_turma_number(text: str) -> str:
     raw = text or ""
+    # Formato "6º Ano|1" (ano|numero_turma)
+    match = re.search(r"\|\s*(\d+)\s*$", raw)
+    if match:
+        return match.group(1)
+
     # Preferencial: "Turma 1"
     match = re.search(r"turma\s*(\d+)", raw, flags=re.IGNORECASE)
     if match:
@@ -1610,7 +1617,11 @@ def _set_filters_on_portal(page, contexto: ContextoTurma, logger: Optional[LogFn
                     "button:has-text('Filtr')",
                 ],
             ):
-                page.wait_for_timeout(700)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=30000)
+                except Exception:  # noqa: BLE001
+                    pass
+                page.wait_for_timeout(1000)
 
             _log(logger, "Filtros de contexto aplicados na tela do professor.")
             return

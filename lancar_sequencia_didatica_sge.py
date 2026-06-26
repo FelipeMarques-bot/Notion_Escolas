@@ -73,7 +73,8 @@ SEQUENCIAS_DB_TITLE = "sequencias didaticas - pdfs"
 TURMAS_POR_ANO: Dict[str, List[Tuple[str, str, str]]] = {
     "6º Ano": [
         ("Juvenal", "Matutino", "6º Ano"),
-        ("Arapongas", "Vespertino", "6º Ano"),
+        ("Arapongas", "Vespertino", "6º Ano|1"),
+        ("Arapongas", "Vespertino", "6º Ano|2"),
         ("Mulde", "Matutino", "6º Ano"),
         ("Anna Alves", "Vespertino", "6º Ano"),
         ("Tancredo", "Matutino", "6º Ano"),
@@ -125,6 +126,8 @@ class SequenciaRegistro:
     periodo_inicio: str  # dd/mm/yyyy
     periodo_fim: str  # dd/mm/yyyy
     n_aulas: int
+    link_arquivo: str = ""
+    status: str = ""
 
 
 @dataclass
@@ -366,6 +369,21 @@ def _load_sequencias_from_notion(logger=None) -> List[SequenciaRegistro]:
             titulo_documento = titulo_linha
 
         arquivo_nome, arquivo_url = _first_file_from_prop(props.get("Arquivo PDF", {}))
+        link_arquivo = _extract_select_or_text(props, ["Link do arquivo", "Link do Arquivo"])
+        if not link_arquivo:
+            for pname, pval in props.items():
+                ptype = pval.get("type", "")
+                if ptype == "url":
+                    link_arquivo = pval.get("url", "") or ""
+                    if link_arquivo:
+                        print(f"[diag] URL encontrada em '{pname}' (tipo={ptype}): {link_arquivo}")
+                        break
+                elif ptype == "rich_text":
+                    txt = _extract_plain_text(pval).strip()
+                    if txt and ("http://" in txt or "https://" in txt or "drive.google" in txt):
+                        link_arquivo = txt
+                        print(f"[diag] URL extraida de rich_text '{pname}': {link_arquivo}")
+                        break
 
         # Em vez de chamar _extract_date_property duas vezes (que retorna
         # o mesmo inicio), le a coluna 'Periodo' (unica) uma vez e extrai
@@ -423,23 +441,22 @@ def _load_sequencias_from_notion(logger=None) -> List[SequenciaRegistro]:
 
         n_aulas = _extract_number_property(props, ["N aulas", "Nº aulas", "Numero de aulas"])
 
-        # Fallback: se N aulas nao estiver preenchido, calcular dias corridos
-        # entre inicio e fim (formula conservadora: 1 aula por dia).
-        if n_aulas <= 0 and periodo_inicio and periodo_fim:
-            try:
-                di = datetime.strptime(periodo_inicio, "%d/%m/%Y")
-                df = datetime.strptime(periodo_fim, "%d/%m/%Y")
-                diff = (df - di).days + 1
-                if diff > 0:
-                    n_aulas = diff
-                    _log(logger, f"Linha '{titulo_linha or '(sem titulo)'}': N aulas ausente, usando {n_aulas} (dias corridos).")
-            except ValueError:
-                pass
+        # Fallback: se N aulas nao estiver preenchido, usar 4 (1 aula/semana
+        # para um mes letivo tipico).
+        if n_aulas <= 0:
+            n_aulas = 4
+            _log(logger, f"Linha '{titulo_linha or '(sem titulo)'}': N aulas ausente, usando {n_aulas} (padrao 1 aula/semana).")
+
+        status = _extract_select_or_text(props, ["Status publicação plano SGE", "Status publicacao plano SGE"]).strip()
+
+        if status.lower() == "publicado":
+            _log(logger, f"Linha '{titulo_linha or '(sem titulo)'}' ja publicada; pulando.")
+            continue
 
         # Log detalhado do que faltou (ajuda a diagnosticar schema do Notion).
         missing = []
         if not titulo_documento: missing.append("Titulo Documento")
-        if not arquivo_url: missing.append("Arquivo PDF (sem URL)")
+        if not arquivo_url and not link_arquivo: missing.append("Arquivo PDF (sem URL ou link)")
         if not periodo_inicio: missing.append("Periodo inicio")
         if not periodo_fim: missing.append("Periodo fim")
         if n_aulas <= 0: missing.append("N aulas")
@@ -457,9 +474,11 @@ def _load_sequencias_from_notion(logger=None) -> List[SequenciaRegistro]:
                 titulo_documento=titulo_documento,
                 arquivo_nome=arquivo_nome,
                 arquivo_url=arquivo_url,
+                link_arquivo=link_arquivo,
                 periodo_inicio=periodo_inicio,
                 periodo_fim=periodo_fim,
                 n_aulas=n_aulas,
+                status=status,
             )
         )
 
@@ -629,10 +648,18 @@ def _pick_template_for_context(
         titulo_documento=chosen.titulo_documento,
         arquivo_nome=chosen.arquivo_nome,
         arquivo_url=chosen.arquivo_url,
+        link_arquivo=chosen.link_arquivo,
         periodo_inicio=override_inicio or chosen.periodo_inicio,
         periodo_fim=override_fim or chosen.periodo_fim,
         n_aulas=chosen.n_aulas,
     )
+
+
+def _drive_direct_url(url: str) -> str:
+    match = re.search(r"(?:drive\.google\.com/file/d/|drive\.google\.com/open\?id=|drive\.google\.com/uc\?id=)([a-zA-Z0-9_-]+)", url)
+    if match:
+        return f"https://drive.google.com/uc?export=download&id={match.group(1)}"
+    return url
 
 
 def _download_pdf(url: str, name_hint: str) -> str:
@@ -644,7 +671,8 @@ def _download_pdf(url: str, name_hint: str) -> str:
     tmp_dir = tempfile.mkdtemp(prefix="seq_didatica_")
     target = os.path.join(tmp_dir, safe_name)
 
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    dl_url = _drive_direct_url(url)
+    req = urllib.request.Request(dl_url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req, timeout=45) as resp:  # noqa: S310
         data = resp.read()
 
@@ -655,28 +683,56 @@ def _download_pdf(url: str, name_hint: str) -> str:
 
 
 def _open_plano_aulas_for_context(page, contexto: ContextoPlano, logger=None) -> bool:
-    _select_context(page, contexto, logger=logger)
+    # 0) Garante que estamos na pagina principal do portal (grid de escolas)
+    page.goto("https://www.sge8147.com.br/hportalprofessor.aspx", wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+    try:
+        page.wait_for_load_state("networkidle", timeout=NAV_TIMEOUT_MS)
+    except Exception:  # noqa: BLE001
+        pass
+    page.wait_for_timeout(1500)
 
-    # Navega para a pagina de Plano de Aulas
-    if not _click_any_selector_any_scope(page, [
-        "a[onclick*='PLANOAULA' i]",
-        "img[alt*='Plano de Aulas' i]",
-        "a:has(img[alt*='Plano de Aulas' i])",
-        "input[type='image'][alt*='Plano de Aulas' i]",
-        "*:has-text('Plano de Aulas')",
-    ]):
-        page.goto("https://www.sge8147.com.br/hportalplanejamentoaula.aspx", wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+    # 1) Seleciona a escola clicando no link da grid (navega via POST para pagina de turmas)
+    escola_ok = False
+    for _ in range(5):
+        try:
+            page.wait_for_load_state("networkidle", timeout=15000)
+        except Exception:  # noqa: BLE001
+            pass
+        page.wait_for_timeout(1000)
+        if _click_text_any_scope(page, contexto.escola):
+            escola_ok = True
+            break
+    if not escola_ok:
+        _log(logger, f"Nao foi possivel clicar na escola '{contexto.escola}' apos 5 tentativas.")
+        return False
+    try:
+        page.wait_for_load_state("networkidle", timeout=NAV_TIMEOUT_MS)
+    except Exception:  # noqa: BLE001
+        pass
+    page.wait_for_timeout(2000)
 
-    page.wait_for_timeout(1000)
-    _set_filters_on_portal(page, contexto, logger=logger)
-
+    # 2) Localiza a linha da disciplina/turma correta e clica no icone "Plano de Aulas"
     turma_num = _extract_turma_number(contexto.turma)
     trimestre_num = _extract_first_number(contexto.trimestre)
     turno_norm = _normalize(contexto.turno).upper()
+    etapa_num = _extract_first_number(contexto.turma)
+
+    # Tenta primeiro com filtros (se existirem)
+    _set_filters_on_portal(page, contexto, logger=logger)
+    page.wait_for_timeout(1500)
 
     for scope in _iter_scopes(page):
-        hidden_rows = scope.locator("input[name^='W0019W0075_TURNUMSTR_']")
-        total = hidden_rows.count()
+        # Aguarda o grid carregar (ate 8s).
+        for attempt in range(10):
+            hidden_rows = scope.locator("input[name^='W0019W0075_TURNUMSTR_']")
+            total = hidden_rows.count()
+            if total > 0:
+                break
+            page.wait_for_timeout(500)
+        else:
+            total = 0
+        _log(logger, f"Linhas de disciplina encontradas: {total}")
+
         for idx in range(total):
             cell = hidden_rows.nth(idx)
             try:
@@ -688,18 +744,22 @@ def _open_plano_aulas_for_context(page, contexto: ContextoPlano, logger=None) ->
             ok_turno = bool(turno_norm and _normalize(turno_norm) in norm)
             ok_turma = True if not turma_num else bool(re.search(rf"\bturma\s*{re.escape(turma_num)}\b", norm))
             ok_trim = bool(trimestre_num and f"{trimestre_num}o trimestre" in norm)
-            if not (ok_turno and ok_turma and ok_trim):
+            ok_etapa = not bool(etapa_num) or bool(re.search(rf"\b{re.escape(etapa_num)}\s*[ºo]?\s*ano\b", norm))
+            if not (ok_turno and ok_turma and ok_trim and ok_etapa):
                 continue
+
+            _log(logger, f"Disciplina correspondente encontrada: {label}")
 
             name = (cell.get_attribute("name") or "")
             suffix = name.rsplit("_", 1)[-1]
             selectors = [
+                f"#W0019W0075_DISCIPLINA_{suffix}",
+                f"img[name='W0019W0075_DISCIPLINA_{suffix}']",
+                f"a:has(img[name='W0019W0075_DISCIPLINA_{suffix}'])",
                 f"#W0019W0075_PLANOAULA_{suffix}",
                 f"img[name='W0019W0075_PLANOAULA_{suffix}']",
                 f"#W0019W0075_PLANODEAULA_{suffix}",
                 f"img[name='W0019W0075_PLANODEAULA_{suffix}']",
-                f"#W0019W0075_PLANOAULAS_{suffix}",
-                f"img[name='W0019W0075_PLANOAULAS_{suffix}']",
             ]
             for sel in selectors:
                 try:
@@ -707,58 +767,123 @@ def _open_plano_aulas_for_context(page, contexto: ContextoPlano, logger=None) ->
                     if icon.count() == 0:
                         continue
                     icon.first.click(timeout=ACTION_TIMEOUT_MS)
-                    page.wait_for_timeout(800)
-                    return True
+                    try:
+                        page.wait_for_load_state("networkidle", timeout=NAV_TIMEOUT_MS)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    page.wait_for_timeout(2000)
+                    url_atual = (page.url or "").lower()
+                    if "planejamentoaula" in url_atual:
+                        _log(logger, "Icone Plano de Aulas clicado; navegacao concluida.")
+                        return True
                 except Exception:  # noqa: BLE001
                     continue
 
-    return True
+    # 3) Tenta novamente SEM filtros, procurando a linha manualmente
+    _log(logger, "Tentando encontrar disciplina SEM filtros...")
+    try:
+        # Recarrega a pagina da escola sem filtros
+        page.goto("https://www.sge8147.com.br/hportalprofessor.aspx", wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+        page.wait_for_load_state("networkidle", timeout=NAV_TIMEOUT_MS)
+        page.wait_for_timeout(1500)
+        _click_text_any_scope(page, contexto.escola)
+        page.wait_for_load_state("networkidle", timeout=NAV_TIMEOUT_MS)
+        page.wait_for_timeout(3000)
+    except Exception:  # noqa: BLE001
+        pass
+
+    for scope in _iter_scopes(page):
+        for attempt in range(10):
+            hidden_rows = scope.locator("input[name^='W0019W0075_TURNUMSTR_']")
+            total = hidden_rows.count()
+            if total > 0:
+                break
+            page.wait_for_timeout(500)
+        else:
+            total = 0
+        _log(logger, f"Linhas de disciplina SEM filtro: {total}")
+
+        for idx in range(total):
+            try:
+                label = (hidden_rows.nth(idx).input_value(timeout=400) or "").strip()
+            except Exception:  # noqa: BLE001
+                continue
+            norm = _normalize(label)
+            ok_turno = bool(turno_norm and _normalize(turno_norm) in norm)
+            ok_turma = True if not turma_num else bool(re.search(rf"\bturma\s*{re.escape(turma_num)}\b", norm))
+            ok_trim = bool(trimestre_num and f"{trimestre_num}o trimestre" in norm)
+            ok_etapa = not bool(etapa_num) or bool(re.search(rf"\b{re.escape(etapa_num)}\s*[ºo]?\s*ano\b", norm))
+            if not (ok_turno and ok_turma and ok_trim and ok_etapa):
+                continue
+            _log(logger, f"Disciplina correspondente encontrada (sem filtro): {label}")
+            name = (hidden_rows.nth(idx).get_attribute("name") or "")
+            suffix = name.rsplit("_", 1)[-1]
+            for sel in [
+                f"#W0019W0075_DISCIPLINA_{suffix}",
+                f"img[name='W0019W0075_DISCIPLINA_{suffix}']",
+                f"a:has(img[name='W0019W0075_DISCIPLINA_{suffix}'])",
+                f"#W0019W0075_PLANOAULA_{suffix}",
+                f"img[name='W0019W0075_PLANOAULA_{suffix}']",
+                f"a:has(img[name='W0019W0075_PLANOAULA_{suffix}'])",
+            ]:
+                try:
+                    icon = scope.locator(sel)
+                    if icon.count() == 0:
+                        continue
+                    icon.first.click(timeout=ACTION_TIMEOUT_MS)
+                    page.wait_for_load_state("networkidle", timeout=NAV_TIMEOUT_MS)
+                    page.wait_for_timeout(2000)
+                    if "planejamentoaula" in (page.url or "").lower():
+                        _log(logger, "Icone Plano de Aulas clicado; navegacao concluida.")
+                        return True
+                except Exception:  # noqa: BLE001
+                    continue
+
+    # 5) Fallback: navegacao direta
+    _log(logger, "Nenhuma linha com icone PLANOAULA encontrada; tentando navegacao direta...")
+    page.goto("https://www.sge8147.com.br/hportalplanejamentoaula.aspx", wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+    page.wait_for_timeout(2000)
+    url_atual = (page.url or "").lower()
+    if "planejamentoaula" in url_atual:
+        _log(logger, "Navegacao direta funcionou.")
+        return True
+    _log(logger, f"Navegacao falhou. URL atual: {url_atual}")
+    return False
 
 
 def _set_periodo_and_aulas(page, data_inicio: str, data_fim: str, n_aulas: int) -> bool:
+    try:
+        page.locator("input[name='_PLAULADTINICIO']").fill(data_inicio, timeout=ACTION_TIMEOUT_MS)
+        page.locator("input[name='_PLAULADTFIM']").fill(data_fim, timeout=ACTION_TIMEOUT_MS)
+        page.locator("input[name='_PLAULANUMAULAS']").fill(str(int(n_aulas)), timeout=ACTION_TIMEOUT_MS)
+        page.wait_for_timeout(500)
+        return True
+    except Exception:  # noqa: BLE001
+        pass
+
+    # fallback: generic JS approach
     js = """
     ({ inicio, fim, aulas }) => {
-      const visible = (el) => {
-        const st = window.getComputedStyle(el);
-        return st.visibility !== 'hidden' && st.display !== 'none';
-      };
-
       const allText = Array.from(document.querySelectorAll('input[type="text"], input[type="number"]'))
-        .filter((el) => !el.disabled && !el.readOnly && visible(el));
-
+        .filter((el) => !el.disabled && !el.readOnly);
       const isDateLike = (el) => {
         const key = `${el.name || ''} ${el.id || ''}`.toLowerCase();
         return key.includes('period') || key.includes('data') || key.includes('dt');
       };
-
       let dateInputs = allText.filter(isDateLike);
-      if (dateInputs.length < 2) {
-        dateInputs = allText.filter((el) => (el.value || '').trim() === '').slice(0, 2);
-      }
       if (dateInputs.length >= 2) {
         dateInputs[0].value = inicio;
-        dateInputs[0].dispatchEvent(new Event('input', { bubbles: true }));
-        dateInputs[0].dispatchEvent(new Event('change', { bubbles: true }));
-
         dateInputs[1].value = fim;
-        dateInputs[1].dispatchEvent(new Event('input', { bubbles: true }));
-        dateInputs[1].dispatchEvent(new Event('change', { bubbles: true }));
       }
-
       let aulasInput = allText.find((el) => {
         const key = `${el.name || ''} ${el.id || ''}`.toLowerCase();
-        return key.includes('aula') || key.includes('aul');
+        return key.includes('aula');
       });
-
-            if (!aulasInput) {
-                aulasInput = allText.find((el) => /^\\d*$/.test((el.value || '').trim())) || null;
-            }
-
+      if (!aulasInput) {
+        aulasInput = allText.find((el) => /^\\d*$/.test((el.value || '').trim())) || null;
+      }
       if (!aulasInput) return false;
-
       aulasInput.value = String(aulas);
-      aulasInput.dispatchEvent(new Event('input', { bubbles: true }));
-      aulasInput.dispatchEvent(new Event('change', { bubbles: true }));
       return true;
     }
     """
@@ -770,43 +895,63 @@ def _set_periodo_and_aulas(page, data_inicio: str, data_fim: str, n_aulas: int) 
 
 def _click_confirmar(page) -> bool:
     selectors = [
+        "input[name='BTNCONFIRMAR']",
         "button:has-text('Confirmar')",
-        "input[type='submit'][value*='Confirmar' i]",
-        "input[type='button'][value*='Confirmar' i]",
+        "input[value*='Confirmar' i]",
     ]
     return _click_any_selector_any_scope(page, selectors)
 
 
 def _click_plus_planejamento(page) -> bool:
-        js = """
-        () => {
-            const txt = Array.from(document.querySelectorAll('body *')).find((el) => {
-                const t = (el.textContent || '').toLowerCase();
-                return t.includes('planejamentos:');
-            });
-            if (!txt) return false;
-            const root = txt.closest('table, div, tr, td') || txt.parentElement || document.body;
-            const candidate = root.querySelector('img[alt="+"], input[type="image"][alt="+"], a img[alt="+"], img[src*="plus" i], img[src*="mais" i]');
-            if (!candidate) return false;
+    js = """
+    () => {
+        const incluir = document.querySelector('a[onclick*="INCLUIRPLANEJAMENTO" i]');
+        if (incluir) { incluir.click(); return true; }
+
+        const txt = Array.from(document.querySelectorAll('body *')).find((el) => {
+            const t = (el.textContent || '').toLowerCase();
+            return t.includes('planejamentos:');
+        });
+        if (!txt) return false;
+        const root = txt.closest('table, div, tr, td') || txt.parentElement || document.body;
+        const candidate = root.querySelector(
+            'img[alt="+"], input[type="image"][alt="+"], a img[alt="+"], img[src*="plus" i], img[src*="mais" i]' +
+            ', button, a, input[type="submit"], input[type="button"]'
+        );
+        if (!candidate) return false;
+        if (['A', 'BUTTON', 'INPUT'].includes(candidate.tagName)) {
+            candidate.click();
+        } else {
             const clickable = candidate.closest('a, button, input[type="image"]') || candidate;
             clickable.click();
-            return true;
         }
-        """
-        try:
-            if page.evaluate(js):
-                return True
-        except Exception:  # noqa: BLE001
-            pass
+        return true;
+    }
+    """
+    try:
+        if page.evaluate(js):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
 
-        selectors = [
-            "img[alt='+']",
-            "input[type='image'][alt='+']",
-            "a:has(img[alt='+'])",
-            "img[src*='plus' i]",
-            "img[src*='mais' i]",
-        ]
-        return _click_any_selector_any_scope(page, selectors)
+    selectors = [
+        "a[onclick*='INCLUIRPLANEJAMENTO' i]",
+        "a:has(img[name='INCLUI'])",
+        "img[name='INCLUI']",
+        "img[alt='+']",
+        "input[type='image'][alt='+']",
+        "a:has(img[alt='+'])",
+        "img[src*='plus' i]",
+        "img[src*='mais' i]",
+        "button:has-text('+')",
+        "a:has-text('+')",
+        "[title*='Adicionar' i]",
+        "[title*='Novo' i]",
+        "[title*='Novo Planejamento' i]",
+        "[class*='mais' i]",
+        "[class*='incluir' i]",
+    ]
+    return _click_any_selector_any_scope(page, selectors)
 
 
 def _click_cell_action_by_header(row, header_key: str, prefer_arrow: bool = False) -> bool:
@@ -884,10 +1029,14 @@ def _click_cell_action_by_header(row, header_key: str, prefer_arrow: bool = Fals
 def _row_for_periodo(page, data_inicio: str, data_fim: str):
     dd_i = data_inicio[:5]
     dd_f = data_fim[:5]
+    found = None
 
     for scope in _iter_scopes(page):
         try:
-            rows = scope.locator("tr")
+            grid = scope.locator("table[id='GRIDPLANEJADO']")
+            if grid.count() == 0:
+                continue
+            rows = grid.locator("> tbody > tr")
             total = rows.count()
         except Exception:  # noqa: BLE001
             continue
@@ -898,10 +1047,14 @@ def _row_for_periodo(page, data_inicio: str, data_fim: str):
                 text = _normalize(row.inner_text(timeout=300))
             except Exception:  # noqa: BLE001
                 continue
+            if not text:
+                continue
+            if "periodo" in text or "situacao" in text:
+                continue
             if dd_i in text and dd_f in text:
-                return row
+                found = row
 
-    return None
+    return found
 
 
 def _click_anexo_icon_on_row(row) -> bool:
@@ -936,39 +1089,46 @@ def _click_anexo_icon_on_row(row) -> bool:
 
 
 def _click_plus_anexo_section(page) -> bool:
-    js = """
-    () => {
-      const txt = Array.from(document.querySelectorAll('body *')).find((el) => {
-        const t = (el.textContent || '').toLowerCase();
-        return t.includes('anexos do planej') || t.includes('anexos do planeja');
-      });
-      if (!txt) return false;
-      const root = txt.closest('table, div, tr, td') || txt.parentElement || document.body;
-      const candidate = root.querySelector('img[alt="+"], input[type="image"][alt="+"], a img[alt="+"]');
-      if (!candidate) return false;
-      const clickable = candidate.closest('a, button, input[type="image"]') || candidate;
-      clickable.click();
-      return true;
-    }
-    """
-    try:
-        if page.evaluate(js):
-            return True
-    except Exception:  # noqa: BLE001
-        pass
+    for scope in _iter_scopes(page):
+        for sel in [
+            "a[onclick*='INCLUIRANEXO']",
+            "[name='W0260INCLUIANEXO']",
+            "[id='W0260INCLUIANEXO']",
+            "img[title*='Incluir anexo']",
+            "img[title*='Incluir'][alt]",
+            "input[type='image'][name*='INCLUIANEXO']",
+        ]:
+            try:
+                loc = scope.locator(sel)
+                if loc.count() == 0:
+                    continue
+                clickable = loc.first
+                a_parent = clickable.locator("xpath=ancestor-or-self::a[1]")
+                if a_parent.count() > 0:
+                    a_parent.first.click(timeout=ACTION_TIMEOUT_MS)
+                else:
+                    clickable.click(timeout=ACTION_TIMEOUT_MS)
+                return True
+            except Exception:  # noqa: BLE001
+                continue
 
-    return _click_plus_planejamento(page)
+    return False
 
 
 def _fill_anexo_form(page, titulo_documento: str, arquivo_path: str) -> bool:
-    # Documento
     ok_doc = False
+    tipo_set = False
+    file_set = False
+
     for scope in _iter_scopes(page):
-        for sel in [
-            "input[name*='DOCUMENT' i]",
-            "input[id*='DOCUMENT' i]",
+        doc_selectors = [
+            "input[name*='ARQNOM' i]",
+            "input[name*='DOCOBS' i]",
+            "input[id*='ARQNOM' i]",
+            "input[name*='PLAULA' i][type='text']",
             "input[type='text']",
-        ]:
+        ]
+        for sel in doc_selectors:
             try:
                 loc = scope.locator(sel)
                 if loc.count() == 0:
@@ -981,8 +1141,6 @@ def _fill_anexo_form(page, titulo_documento: str, arquivo_path: str) -> bool:
         if ok_doc:
             break
 
-    # Tipo
-    tipo_set = False
     for scope in _iter_scopes(page):
         try:
             selects = scope.locator("select")
@@ -1004,7 +1162,7 @@ def _fill_anexo_form(page, titulo_documento: str, arquivo_path: str) -> bool:
                     label = (options.nth(j).inner_text(timeout=200) or "").strip()
                 except Exception:  # noqa: BLE001
                     continue
-                if "detal" in _normalize(label):
+                if "detal" in _normalize(label) or "descricao" in _normalize(label) or "anexo" in _normalize(label):
                     target_value = options.nth(j).get_attribute("value")
                     break
 
@@ -1018,8 +1176,6 @@ def _fill_anexo_form(page, titulo_documento: str, arquivo_path: str) -> bool:
         if tipo_set:
             break
 
-    # Arquivo
-    file_set = False
     for scope in _iter_scopes(page):
         try:
             file_loc = scope.locator("input[type='file']")
@@ -1035,6 +1191,9 @@ def _fill_anexo_form(page, titulo_documento: str, arquivo_path: str) -> bool:
 
 def _click_inicio(page) -> None:
     _click_text_any_scope(page, "Inicio")
+    page.goto("https://www.sge8147.com.br/hportalprofessor.aspx", wait_until="domcontentloaded", timeout=NAV_TIMEOUT_MS)
+    page.wait_for_load_state("networkidle", timeout=NAV_TIMEOUT_MS)
+    page.wait_for_timeout(1500)
 
 
 def _ativar_situacao_da_linha(row) -> bool:
@@ -1087,54 +1246,117 @@ def _executar_fluxo_plano_aulas(page, contexto: ContextoPlano, registro: Sequenc
         return True, False, False
 
     if not _click_plus_planejamento(page):
+        debug_dir = os.environ.get("SGE_DEBUG_DIR", "artifacts/sge-login")
+        os.makedirs(debug_dir, exist_ok=True)
+        try:
+            page.screenshot(path=os.path.join(debug_dir, f"falha_mais_{contexto.escola}.png"), full_page=True)
+            with open(os.path.join(debug_dir, f"falha_mais_{contexto.escola}.html"), "w", encoding="utf-8") as f:
+                f.write(page.content())
+        except Exception:
+            pass
         raise LancamentoError("Nao foi possivel clicar no '+' de Planejamentos.")
 
+    # Aguarda o recarregamento da pagina apos o submit do "+" (INCLUIRPLANEJAMENTO)
+    page.wait_for_load_state("networkidle", timeout=NAV_TIMEOUT_MS)
+    page.wait_for_timeout(2000)
+
     if not _set_periodo_and_aulas(page, registro.periodo_inicio, registro.periodo_fim, registro.n_aulas):
+        debug_dir = os.environ.get("SGE_DEBUG_DIR", "artifacts/sge-login")
+        os.makedirs(debug_dir, exist_ok=True)
+        try:
+            page.screenshot(path=os.path.join(debug_dir, f"falha_periodo_{contexto.escola}.png"), full_page=True)
+            with open(os.path.join(debug_dir, f"falha_periodo_{contexto.escola}.html"), "w", encoding="utf-8") as f:
+                f.write(page.content())
+        except Exception:
+            pass
         raise LancamentoError("Nao foi possivel preencher Periodo/N aulas na tela de Planejamentos.")
 
     if not _click_confirmar(page):
-        raise LancamentoError("Nao foi possivel confirmar criacao do planejamento.")
-    ok_planejamento = True
+        debug_dir = os.environ.get("SGE_DEBUG_DIR", "artifacts/sge-login")
+        os.makedirs(debug_dir, exist_ok=True)
+        try:
+            page.screenshot(path=os.path.join(debug_dir, f"falha_confirmar_{contexto.escola}.png"), full_page=True)
+            with open(os.path.join(debug_dir, f"falha_confirmar_{contexto.escola}.html"), "w", encoding="utf-8") as f:
+                f.write(page.content())
+        except Exception:
+            pass
+        raise LancamentoError("Nao foi possivel clicar no botao Confirmar.")
 
+    # Aguarda recarregamento da pagina apos confirmar
+    page.wait_for_load_state("networkidle", timeout=NAV_TIMEOUT_MS)
+    page.wait_for_timeout(2500)
+
+    # Verifica se o planejamento foi criado de fato: o form TABDADOSPLANEJAMENTO
+    # deve estar oculto (display:none) e GRIDPLANEJADO visivel.
+    form_visivel = False
     try:
-        page.wait_for_timeout(1200)
+        form_visivel = page.locator("table[id='TABDADOSPLANEJAMENTO']").is_visible(timeout=1000)
     except Exception:  # noqa: BLE001
         pass
 
+    if form_visivel:
+        debug_dir = os.environ.get("SGE_DEBUG_DIR", "artifacts/sge-login")
+        os.makedirs(debug_dir, exist_ok=True)
+        try:
+            page.screenshot(path=os.path.join(debug_dir, f"falha_confirmar_{contexto.escola}.png"), full_page=True)
+            with open(os.path.join(debug_dir, f"falha_confirmar_{contexto.escola}.html"), "w", encoding="utf-8") as f:
+                f.write(page.content())
+        except Exception:
+            pass
+        raise LancamentoError("Falha ao criar planejamento (formulario ainda visivel apos Confirmar).")
+
+    ok_planejamento = True
+
     row = _row_for_periodo(page, registro.periodo_inicio, registro.periodo_fim)
     if row is None:
+        debug_dir = os.environ.get("SGE_DEBUG_DIR", "artifacts/sge-login")
+        os.makedirs(debug_dir, exist_ok=True)
+        try:
+            page.screenshot(path=os.path.join(debug_dir, f"falha_row_{contexto.escola}.png"), full_page=True)
+            with open(os.path.join(debug_dir, f"falha_row_{contexto.escola}.html"), "w", encoding="utf-8") as f:
+                f.write(page.content())
+        except Exception:
+            pass
         raise LancamentoError("Planejamento criado, mas linha por periodo nao foi localizada para anexar arquivo.")
 
     if not _click_anexo_icon_on_row(row):
         raise LancamentoError("Nao foi possivel abrir coluna Anexos da linha criada.")
 
-    try:
-        page.wait_for_timeout(700)
-    except Exception:  # noqa: BLE001
-        pass
+    page.wait_for_load_state("networkidle", timeout=NAV_TIMEOUT_MS)
+    page.wait_for_timeout(2000)
 
     if not _click_plus_anexo_section(page):
         raise LancamentoError("Nao foi possivel clicar no '+' da secao ANEXOS DO PLANEJAMENTO.")
 
-    try:
-        page.wait_for_timeout(700)
-    except Exception:  # noqa: BLE001
-        pass
+    page.wait_for_load_state("networkidle", timeout=NAV_TIMEOUT_MS)
+    page.wait_for_timeout(1500)
 
-    arquivo_local = _download_pdf(registro.arquivo_url, registro.arquivo_nome)
+    pdf_url = registro.arquivo_url or registro.link_arquivo
+    if not pdf_url:
+        raise LancamentoError("Nenhum arquivo PDF ou link do arquivo disponivel para download.")
+    arquivo_local = _download_pdf(pdf_url, registro.arquivo_nome)
     if not _fill_anexo_form(page, registro.titulo_documento, arquivo_local):
+        debug_dir = os.environ.get("SGE_DEBUG_DIR", "artifacts/sge-login")
+        os.makedirs(debug_dir, exist_ok=True)
+        try:
+            page.screenshot(path=os.path.join(debug_dir, f"falha_anexo_form_{contexto.escola}.png"), full_page=True)
+            with open(os.path.join(debug_dir, f"falha_anexo_form_{contexto.escola}.html"), "w", encoding="utf-8") as f:
+                f.write(page.content())
+        except Exception:
+            pass
         raise LancamentoError("Nao foi possivel preencher formulario de anexo (Documento/Tipo/Arquivo).")
 
     if not _click_confirmar(page):
         raise LancamentoError("Nao foi possivel confirmar envio do anexo.")
     ok_anexo = True
 
+    page.wait_for_load_state("networkidle", timeout=NAV_TIMEOUT_MS)
+    page.wait_for_timeout(1500)
+
     # Volta para tela principal do planejamento.
     _click_text_any_scope(page, "Voltar")
-    try:
-        page.wait_for_timeout(900)
-    except Exception:  # noqa: BLE001
-        pass
+    page.wait_for_load_state("networkidle", timeout=NAV_TIMEOUT_MS)
+    page.wait_for_timeout(1500)
 
     row = _row_for_periodo(page, registro.periodo_inicio, registro.periodo_fim)
     if row is not None:
@@ -1231,6 +1453,8 @@ def executar_lancamento_sequencia(
 
     resumo = ExecucaoResumo(contextos_total=len(contextos), falhas_detalhes=[])
 
+    status_map: Dict[str, dict] = {}
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=HEADLESS)
         context = browser.new_context()
@@ -1273,6 +1497,13 @@ def executar_lancamento_sequencia(
                     resumo.anexos_enviados += 1
                 if ok_sit:
                     resumo.situacoes_ativadas += 1
+
+                pid = registro.page_id
+                if pid not in status_map:
+                    status_map[pid] = {"total": 0, "ok": 0, "titulo": registro.titulo_documento}
+                status_map[pid]["total"] += 1
+                if ok_plan and ok_anexo and ok_sit:
+                    status_map[pid]["ok"] += 1
             except PlaywrightTimeoutError as exc:
                 msg = f"Timeout em {turma_label}: {exc}"
                 resumo.falhas += 1
@@ -1288,6 +1519,19 @@ def executar_lancamento_sequencia(
 
         context.close()
         browser.close()
+
+    if not dry_run:
+        notion_status = Client(auth=NOTION_TOKEN)
+        for pid, info in status_map.items():
+            if info["ok"] == info["total"] and info["total"] > 0:
+                try:
+                    notion_status.pages.update(
+                        page_id=pid,
+                        properties={"Status publicação plano SGE": {"select": {"name": "Publicado"}}},
+                    )
+                    _log(logger, f"Notion: registro '{info['titulo']}' marcado como Publicado.")
+                except Exception as exc:  # noqa: BLE001
+                    _log(logger, f"Notion: falha ao marcar '{info['titulo']}' como Publicado: {exc}")
 
     _log(logger, "--- Resumo da execucao ---")
     _log(logger, f"Contextos processados: {resumo.contextos_total}")
