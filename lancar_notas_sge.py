@@ -632,7 +632,20 @@ def _database_title(database: Dict) -> str:
 
 def _is_notas_database(title: str) -> bool:
     normalized = _normalize(title or "")
-    return bool(normalized and normalized.startswith("notas escolas"))
+    if not normalized:
+        return False
+
+    # Aceita pequenas variacoes de titulo, ex.:
+    # - "Notas Escolas - ..."
+    # - "Notas Escola - ..."
+    # - "📊 Notas Escolas ..."
+    if "notas escola" not in normalized:
+        return False
+
+    # Espera algum indicativo de periodo/turma para evitar falso positivo.
+    has_trimestre = "trimestre" in normalized
+    has_turma = bool(re.search(r"\b[6-9]o\s*ano\b", normalized, flags=re.IGNORECASE))
+    return has_trimestre or has_turma
 
 
 def _page_title(page: Dict) -> str:
@@ -695,8 +708,11 @@ def _discover_databases(
                 continue
 
             if btype == "child_database":
-                db_title = block.get("child_database", {}).get("title", "")
-                databases.append((block["id"], breadcrumb.copy(), db_title))
+                db_info = block.get("child_database", {})
+                db_title = db_info.get("title", "")
+                db_id = db_info.get("database_id") or block.get("id", "")
+                if db_id:
+                    databases.append((db_id, breadcrumb.copy(), db_title))
                 continue
 
             if btype in {"linked_database", "synced_database", "database"}:
@@ -891,10 +907,18 @@ def carregar_notas_notion(
 
         title = _database_title(db_obj) or db_title
         if not _is_notas_database(title):
+            if logger and _normalize(title).startswith("notas"):
+                _log(logger, f"Info: database ignorada por nao parecer banco de notas de turma: {title!r}")
             continue
 
         context = _infer_context([*breadcrumb, title])
         if not _context_matches_filter(context, filtro):
+            if logger:
+                _log(
+                    logger,
+                    "Info: database ignorada por nao bater com filtro: "
+                    f"{title!r} | {context.escola} | {context.turno} | {context.turma} | {context.trimestre}",
+                )
             continue
 
         try:
