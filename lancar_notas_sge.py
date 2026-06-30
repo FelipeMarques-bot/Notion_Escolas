@@ -49,6 +49,7 @@ MANUAL_LOGIN = os.environ.get("MANUAL_LOGIN", "0") == "1"
 MANUAL_LOGIN_TIMEOUT_SEC = int(os.environ.get("MANUAL_LOGIN_TIMEOUT_SEC", "300"))
 DEBUG_LOGIN = os.environ.get("SGE_DEBUG_LOGIN", "1" if os.environ.get("GITHUB_ACTIONS") == "true" else "0") == "1"
 DEBUG_OUTPUT_DIR = os.environ.get("SGE_DEBUG_DIR", "artifacts/sge-login")
+DEBUG_SCAN_DATABASES = os.environ.get("SGE_DEBUG_SCAN_DATABASES", "0") == "1"
 NOTION_STATUS_PROP = os.environ.get("NOTION_STATUS_PROP", "Status lancamento")
 NOTION_LAST_RUN_PROP = os.environ.get("NOTION_LAST_RUN_PROP", "Ultima execucao")
 NOTION_LAUNCH_DATE_PROP = os.environ.get("NOTION_LAUNCH_DATE_PROP", "Data lancamento")
@@ -907,13 +908,13 @@ def carregar_notas_notion(
 
         title = _database_title(db_obj) or db_title
         if not _is_notas_database(title):
-            if logger and _normalize(title).startswith("notas"):
+            if logger and DEBUG_SCAN_DATABASES and _normalize(title).startswith("notas"):
                 _log(logger, f"Info: database ignorada por nao parecer banco de notas de turma: {title!r}")
             continue
 
         context = _infer_context([*breadcrumb, title])
         if not _context_matches_filter(context, filtro):
-            if logger:
+            if logger and DEBUG_SCAN_DATABASES:
                 _log(
                     logger,
                     "Info: database ignorada por nao bater com filtro: "
@@ -1757,6 +1758,41 @@ def _is_student_grid_visible(page) -> bool:
 
 def _select_activity(page, atividade: str, logger: Optional[LogFn]) -> None:
     _log(logger, f"Selecionando avaliacao: {atividade}")
+
+    def _variants(label: str) -> List[str]:
+        base = (label or "").strip()
+        if not base:
+            return []
+
+        out = {base}
+
+        # Remove prefixo numerico comum no SGE/Notion: "24-", "24 -", "24)".
+        without_prefix = re.sub(r"^\s*\d+\s*[-\.)]\s*", "", base).strip()
+        if without_prefix:
+            out.add(without_prefix)
+
+        # Remove sufixos administrativos entre colchetes/parênteses.
+        no_brackets = re.sub(r"\s*[\[(].*?[\])]\s*", " ", base).strip()
+        if no_brackets:
+            out.add(no_brackets)
+
+        # Forma loose para bater com variacoes de separador e acentos.
+        out.add(_normalize_loose(base))
+        if without_prefix:
+            out.add(_normalize_loose(without_prefix))
+        if no_brackets:
+            out.add(_normalize_loose(no_brackets))
+
+        return [x for x in out if x]
+
+    variants = _variants(atividade)
+
+    # Tentativa direta nas variacoes mais provaveis do rótulo.
+    for candidate in variants:
+        if _click_text_any_scope(page, candidate):
+            page.wait_for_timeout(500)
+            return
+
     if _click_text_any_scope(page, atividade):
         page.wait_for_timeout(500)
         return
@@ -1769,6 +1805,9 @@ def _select_activity(page, atividade: str, logger: Optional[LogFn]) -> None:
 
     alvo_norm = _normalize(atividade)
     alvo_loose = _normalize_loose(atividade)
+    loose_variants = {_normalize_loose(v) for v in variants}
+    loose_variants.discard("")
+
     for scope in _iter_scopes(page):
         links = scope.locator("a")
         total_links = links.count()
@@ -1788,6 +1827,23 @@ def _select_activity(page, atividade: str, logger: Optional[LogFn]) -> None:
                     link.click(timeout=ACTION_TIMEOUT_MS)
                     page.wait_for_timeout(700)
                     return
+
+                # Similaridade por tokens para casos como:
+                # "24-Resolução de problemas" vs "24 - Resolucao de Problemas".
+                if loose_variants:
+                    for v in loose_variants:
+                        if not v:
+                            continue
+                        if v in texto_loose or texto_loose in v:
+                            link.click(timeout=ACTION_TIMEOUT_MS)
+                            page.wait_for_timeout(700)
+                            return
+                        ratio = difflib.SequenceMatcher(None, v, texto_loose).ratio()
+                        if ratio >= 0.82:
+                            link.click(timeout=ACTION_TIMEOUT_MS)
+                            page.wait_for_timeout(700)
+                            return
+
                 if alvo_norm == "avaliacao" and ("avaliacao" in texto_norm or "avali" in texto_loose):
                     link.click(timeout=ACTION_TIMEOUT_MS)
                     page.wait_for_timeout(700)
