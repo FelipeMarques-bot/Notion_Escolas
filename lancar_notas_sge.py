@@ -631,7 +631,8 @@ def _database_title(database: Dict) -> str:
 
 
 def _is_notas_database(title: str) -> bool:
-    return _normalize(title).startswith("notas escolas -")
+    normalized = _normalize(title or "")
+    return bool(normalized and normalized.startswith("notas escolas"))
 
 
 def _page_title(page: Dict) -> str:
@@ -698,6 +699,14 @@ def _discover_databases(
                 databases.append((block["id"], breadcrumb.copy(), db_title))
                 continue
 
+            if btype in {"linked_database", "synced_database", "database"}:
+                db_data = block.get(btype, {})
+                db_id = db_data.get("database_id") or db_data.get("id")
+                db_title = db_data.get("title", "")
+                if db_id:
+                    databases.append((db_id, breadcrumb.copy(), db_title))
+                continue
+
     return databases
 
 
@@ -759,6 +768,24 @@ def _infer_context(parts: Iterable[str]) -> ContextoTurma:
     trimestre = ""
 
     for p in parts_clean:
+        if (not escola or not turno or not turma or not trimestre) and "notas escolas" in _normalize(p) and "|" in p:
+            segmentos = [seg.strip() for seg in p.split("|") if seg.strip()]
+            if len(segmentos) >= 4:
+                if not trimestre:
+                    maybe_trimestre = segmentos[0]
+                    if "-" in maybe_trimestre:
+                        maybe_trimestre = maybe_trimestre.split("-", 1)[1].strip()
+                    for tr in TRIMESTRES_KNOWN:
+                        if _normalize(tr) in _normalize(maybe_trimestre):
+                            trimestre = tr
+                            break
+                if not escola:
+                    escola = segmentos[1]
+                if not turno:
+                    turno = segmentos[2]
+                if not turma:
+                    turma = segmentos[3]
+
         if not turno:
             for t in TURNOS_KNOWN:
                 if _normalize(t) in _normalize(p):
@@ -889,7 +916,17 @@ def carregar_notas_notion(
         )
 
     if not candidatos:
+        if databases:
+            _log(logger, f"Aviso: {len(databases)} database(s) descoberta(s), mas nenhuma identificada como banco de notas.")
+            for db_id, breadcrumb, title in databases:
+                context = _infer_context([*breadcrumb, title])
+                _log(logger, f"  - {title!r} | id={db_id} | context={context}")
         return registros
+
+    _log(logger, f"Candidatos a lancamento encontrados: {len(candidatos)} database(s)")
+    for candidato in candidatos:
+        ctx = candidato["context"]
+        _log(logger, f"  - {candidato['title']!r} | {ctx.escola} | {ctx.turno} | {ctx.turma} | {ctx.trimestre} | rows={len(candidato['rows'])}")
 
     # Em caso de bases duplicadas com o mesmo titulo, processa apenas a com mais linhas.
     deduplicadas: Dict[str, Dict[str, Any]] = {}
@@ -954,6 +991,7 @@ def carregar_notas_notion(
                 )
 
     if not registros:
+        _log(logger, "Aviso: nenhum registro de nota valido foi construido a partir das databases processadas.")
         raise LancamentoError("Nenhuma nota valida foi encontrada no Notion.")
 
     _log(logger, f"Total de notas carregadas do Notion: {len(registros)}")
