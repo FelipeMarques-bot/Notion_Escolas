@@ -260,7 +260,19 @@ def _to_float(value: object) -> Optional[float]:
             return float(text)
         except ValueError:
             return None
-    return None
+
+    # Fallback tolerante para entradas como "8,0*" ou "nota 7.5".
+    # Evita confundir datas (ex.: 15/05/26) com nota.
+    if re.search(r"\d\s*/\s*\d", text):
+        return None
+
+    match = re.search(r"-?\d+(?:\.\d+)?", text)
+    if not match:
+        return None
+    try:
+        return float(match.group(0))
+    except ValueError:
+        return None
 
 
 def _status_prop_for_activity(atividade: str) -> str:
@@ -269,6 +281,35 @@ def _status_prop_for_activity(atividade: str) -> str:
     if match and match.group(1) in {"1", "2", "3"}:
         return f"Status lancamento {match.group(1)}"
     return "Status lancamento"
+
+
+def _build_activity_status_map(database_obj: Optional[Dict]) -> Dict[str, str]:
+    if not database_obj:
+        return {}
+
+    props = database_obj.get("properties", {}) or {}
+    if not isinstance(props, dict):
+        return {}
+
+    prop_names = list(props.keys())
+    grade_columns = [name for name in prop_names if _is_probably_grade_column(name)]
+    status_columns = [name for name in prop_names if _normalize(name).startswith("status lancamento")]
+
+    mapping: Dict[str, str] = {}
+    for idx, col_name in enumerate(grade_columns, start=1):
+        explicit = _status_prop_for_activity(col_name)
+        if explicit != "Status lancamento":
+            mapping[col_name] = explicit
+            continue
+
+        candidate = f"Status lancamento {idx}"
+        if candidate in status_columns:
+            mapping[col_name] = candidate
+            continue
+
+        mapping[col_name] = "Status lancamento"
+
+    return mapping
 
 
 def _resolve_existing_status_prop(props: Dict[str, Dict], preferred: str) -> str:
@@ -897,6 +938,7 @@ def carregar_notas_notion(
         raise LancamentoError("Nenhuma database foi encontrada a partir de ROOT_PAGE_ID.")
 
     registros: List[RegistroNota] = []
+    invalid_notes_by_col: Dict[str, int] = defaultdict(int)
     candidatos: List[Dict[str, Any]] = []
 
     for db_id, breadcrumb, db_title in databases:
@@ -937,6 +979,7 @@ def carregar_notas_notion(
                 "title": title,
                 "context": context,
                 "rows": rows,
+                "db_obj": db_obj,
             }
         )
 
@@ -976,6 +1019,7 @@ def carregar_notas_notion(
         title = item["title"]
         context = item["context"]
         rows = item["rows"]
+        activity_status_map = _build_activity_status_map(item.get("db_obj"))
         _log(logger, f"Database {title}: {len(rows)} alunos encontrados")
 
         for row in rows:
@@ -997,9 +1041,14 @@ def carregar_notas_notion(
             for col_name, prop in props.items():
                 if not _is_probably_grade_column(col_name):
                     continue
-                nota = _to_float(_extract_plain_text(prop))
+                raw_nota = _extract_plain_text(prop)
+                nota = _to_float(raw_nota)
                 if nota is None:
+                    if _is_non_empty(raw_nota):
+                        invalid_notes_by_col[col_name.strip()] += 1
                     continue
+
+                status_prop = activity_status_map.get(col_name.strip(), _status_prop_for_activity(col_name.strip()))
 
                 registros.append(
                     RegistroNota(
@@ -1011,13 +1060,17 @@ def carregar_notas_notion(
                         atividade=col_name.strip(),
                         nota=nota,
                         notion_page_id=row.get("id", ""),
-                        notion_status_prop=_status_prop_for_activity(col_name.strip()),
+                        notion_status_prop=status_prop,
                     )
                 )
 
     if not registros:
         _log(logger, "Aviso: nenhum registro de nota valido foi construido a partir das databases processadas.")
         raise LancamentoError("Nenhuma nota valida foi encontrada no Notion.")
+
+    if invalid_notes_by_col:
+        resumo_invalid = ", ".join(f"{k}: {v}" for k, v in sorted(invalid_notes_by_col.items()))
+        _log(logger, f"Aviso: valores de nota nao numericos ignorados em colunas: {resumo_invalid}")
 
     _log(logger, f"Total de notas carregadas do Notion: {len(registros)}")
     return registros
