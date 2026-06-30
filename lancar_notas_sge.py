@@ -1756,8 +1756,42 @@ def _is_student_grid_visible(page) -> bool:
     return False
 
 
-def _select_activity(page, atividade: str, logger: Optional[LogFn]) -> None:
+def _go_through_period_selection(page, trimestre: str, logger: Optional[LogFn]) -> bool:
+    # Alguns fluxos do SGE abrem a tela de selecao de periodo (hportalprofperiodos.aspx)
+    # apos clicar no icone de avaliacao da turma. Sem confirmar essa etapa, a
+    # atividade/alunos nunca aparecem.
+    for scope in _iter_scopes(page):
+        try:
+            periodo = scope.locator("select[name='_PERIODO']")
+            confirmar = scope.locator("input[name='BTNCONFIRMAR']")
+            if periodo.count() == 0 or confirmar.count() == 0:
+                continue
+
+            trim_num = _extract_first_number(trimestre)
+            if trim_num:
+                try:
+                    periodo.first.select_option(value=trim_num)
+                except Exception:  # noqa: BLE001
+                    pass
+
+            confirmar.first.click(timeout=ACTION_TIMEOUT_MS)
+            try:
+                page.wait_for_load_state("networkidle", timeout=NAV_TIMEOUT_MS)
+            except Exception:  # noqa: BLE001
+                pass
+            page.wait_for_timeout(700)
+            _log(logger, f"Tela de periodo detectada; avancando com {trimestre}.")
+            return True
+        except Exception:  # noqa: BLE001
+            continue
+
+    return False
+
+
+def _select_activity(page, atividade: str, logger: Optional[LogFn], trimestre: str = "") -> None:
     _log(logger, f"Selecionando avaliacao: {atividade}")
+
+    _go_through_period_selection(page, trimestre=trimestre, logger=logger)
 
     def _variants(label: str) -> List[str]:
         base = (label or "").strip()
@@ -2524,7 +2558,7 @@ def executar_lancamento(
             # Fluxo hibrido assistido: abre o icone de avaliacao da linha da
             # turma/turno/trimestre antes de tentar localizar a atividade.
             _open_assessment_for_context(page, contexto, logger=logger)
-            _select_activity(page, atividade, logger=logger)
+            _select_activity(page, atividade, logger=logger, trimestre=trimestre)
 
             regs_ok_bloco: List[RegistroNota] = []
             regs_fail_bloco: List[RegistroNota] = []
