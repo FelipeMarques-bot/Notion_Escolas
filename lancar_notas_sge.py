@@ -1061,7 +1061,10 @@ def _is_probably_grade_property(col_name: str, prop: Dict[str, Any]) -> bool:
     }:
         return False
 
-    if ptype not in {"rich_text", "number", "formula", "select", "status"}:
+    # Aceita qualquer tipo que nao seja explicitamente estrutural/metadata,
+    # pois algumas bases antigas guardam nota como select/multi_select/formulas
+    # em formatos diferentes.
+    if ptype in {"rollup", "relation", "url", "email", "phone_number"}:
         return False
 
     return _is_probably_grade_column(col_name)
@@ -1188,6 +1191,14 @@ def carregar_notas_notion(
         rows = item["rows"]
         activity_status_map = _build_activity_status_map(item.get("db_obj"))
         _log(logger, f"Database {title}: {len(rows)} alunos encontrados")
+        if logger:
+            db_props = (item.get("db_obj") or {}).get("properties", {}) or {}
+            grade_schema = []
+            for pname, pinfo in db_props.items():
+                if _is_probably_grade_property(pname, pinfo):
+                    grade_schema.append(f"{pname}<{(pinfo or {}).get('type', '?')}>")
+            if grade_schema:
+                _log(logger, f"Diagnostico: colunas de nota detectadas no schema: {', '.join(grade_schema)}")
 
         for row in rows:
             page_id = row.get("id", "")
@@ -1217,8 +1228,12 @@ def carregar_notas_notion(
             if not _is_non_empty(aluno):
                 continue
 
-            for col_name, prop in props.items():
-                if not _is_probably_grade_property(col_name, prop):
+            db_props = (item.get("db_obj") or {}).get("properties", {}) or {}
+            grade_columns = [name for name, p in db_props.items() if _is_probably_grade_property(name, p)]
+
+            for col_name in grade_columns:
+                prop = props.get(col_name, {})
+                if not _is_probably_grade_property(col_name, prop if prop else db_props.get(col_name, {})):
                     continue
                 raw_nota, nota = _extract_grade_value(prop)
                 if nota is None:
