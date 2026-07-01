@@ -276,6 +276,34 @@ def _to_float(value: object) -> Optional[float]:
         return None
 
 
+def _extract_grade_value(prop: Dict[str, Any]) -> Tuple[str, Optional[float]]:
+    ptype = (prop or {}).get("type")
+
+    if ptype == "number":
+        num = prop.get("number")
+        if num is None:
+            return "", None
+        try:
+            return str(num), float(num)
+        except Exception:  # noqa: BLE001
+            return str(num), _to_float(num)
+
+    if ptype == "formula":
+        formula = prop.get("formula", {}) or {}
+        ftype = formula.get("type")
+        if ftype == "number":
+            num = formula.get("number")
+            if num is None:
+                return "", None
+            try:
+                return str(num), float(num)
+            except Exception:  # noqa: BLE001
+                return str(num), _to_float(num)
+
+    raw = _extract_plain_text(prop)
+    return raw, _to_float(raw)
+
+
 def _status_prop_for_activity(atividade: str) -> str:
     texto = (atividade or "").strip().lower()
     match = re.search(r"(\d+)\s*$", texto)
@@ -363,6 +391,49 @@ def _resolve_existing_status_prop(props: Dict[str, Dict], preferred: str) -> str
             return name
 
     return preferred
+
+
+def _pick_status_name(prop_info: Dict[str, Any], desired_names: List[str]) -> Optional[str]:
+    ptype = (prop_info or {}).get("type")
+    node = (prop_info or {}).get(ptype, {}) if ptype in {"select", "status"} else {}
+    options = node.get("options", []) if isinstance(node, dict) else []
+    option_names = [str(opt.get("name", "")).strip() for opt in options if isinstance(opt, dict)]
+    option_names = [name for name in option_names if name]
+
+    if not option_names:
+        return desired_names[0] if desired_names else None
+
+    desired_norm = [_normalize(name) for name in desired_names]
+    for candidate in option_names:
+        if _normalize(candidate) in desired_norm:
+            return candidate
+
+    return None
+
+
+def _build_launch_status_payload(prop_info: Dict[str, Any], success: bool) -> Optional[Dict[str, Any]]:
+    ptype = (prop_info or {}).get("type")
+    if ptype == "select":
+        desired = ["Lancada", "Lançada", "Concluido", "Concluído", "OK"] if success else ["Falha", "Erro", "Pendente"]
+        picked = _pick_status_name(prop_info, desired)
+        if not picked:
+            return None
+        return {"select": {"name": picked}}
+
+    if ptype == "status":
+        desired = ["Lancada", "Lançada", "Concluido", "Concluído", "Concluido(a)", "Done"] if success else ["Falha", "Erro", "Pendente", "To-do"]
+        picked = _pick_status_name(prop_info, desired)
+        if not picked:
+            return None
+        return {"status": {"name": picked}}
+
+    if ptype == "checkbox":
+        return {"checkbox": bool(success)}
+
+    if ptype == "rich_text":
+        return {"rich_text": _make_rich_text("Lancada" if success else "Falha")}
+
+    return None
 
 
 def _student_name_matches(expected: str, current: str) -> bool:
@@ -1000,6 +1071,7 @@ def carregar_notas_notion(
     registros: List[RegistroNota] = []
     invalid_notes_by_col: Dict[str, int] = defaultdict(int)
     parsed_notes_by_col: Dict[str, int] = defaultdict(int)
+    non_empty_values_by_col: Dict[str, int] = defaultdict(int)
     samples_invalid_by_col: Dict[str, List[str]] = defaultdict(list)
     candidatos: List[Dict[str, Any]] = []
 
@@ -1103,10 +1175,10 @@ def carregar_notas_notion(
             for col_name, prop in props.items():
                 if not _is_probably_grade_property(col_name, prop):
                     continue
-                raw_nota = _extract_plain_text(prop)
-                nota = _to_float(raw_nota)
+                raw_nota, nota = _extract_grade_value(prop)
                 if nota is None:
                     if _is_non_empty(raw_nota):
+                        non_empty_values_by_col[col_name.strip()] += 1
                         invalid_notes_by_col[col_name.strip()] += 1
                         if len(samples_invalid_by_col[col_name.strip()]) < 5:
                             samples_invalid_by_col[col_name.strip()].append(str(raw_nota).strip())
@@ -1114,6 +1186,8 @@ def carregar_notas_notion(
 
                 status_prop = activity_status_map.get(col_name.strip(), _status_prop_for_activity(col_name.strip()))
                 parsed_notes_by_col[col_name.strip()] += 1
+                if _is_non_empty(raw_nota):
+                    non_empty_values_by_col[col_name.strip()] += 1
 
                 registros.append(
                     RegistroNota(
@@ -1140,6 +1214,10 @@ def carregar_notas_notion(
     if parsed_notes_by_col:
         resumo_parsed = ", ".join(f"{k}: {v}" for k, v in sorted(parsed_notes_by_col.items()))
         _log(logger, f"Diagnostico: notas validas por coluna: {resumo_parsed}")
+
+    if non_empty_values_by_col:
+        resumo_non_empty = ", ".join(f"{k}: {v}" for k, v in sorted(non_empty_values_by_col.items()))
+        _log(logger, f"Diagnostico: valores nao vazios por coluna: {resumo_non_empty}")
 
     if samples_invalid_by_col:
         for col_name, samples in sorted(samples_invalid_by_col.items()):
@@ -2506,18 +2584,12 @@ def _update_launch_status_for_notes(registros: List[RegistroNota], logger: Optio
             props = page.get("properties", {})
             status_prop_real = _resolve_existing_status_prop(props, status_prop)
             prop_info = props.get(status_prop_real, {})
-            ptype = prop_info.get("type")
-
-            if ptype == "select":
-                payload = {status_prop_real: {"select": {"name": "Lancada"}}}
-            elif ptype == "checkbox":
-                payload = {status_prop_real: {"checkbox": True}}
-            elif ptype == "rich_text":
-                payload = {status_prop_real: {"rich_text": _make_rich_text("Lancada")}}
-            else:
+            status_payload = _build_launch_status_payload(prop_info, success=True)
+            if status_payload is None:
                 _log(logger, f"Aviso: propriedade de status nao encontrada/compativel para {reg.aluno}: {status_prop}")
                 falhas += 1
                 continue
+            payload = {status_prop_real: status_payload}
 
             _safe_notion_call(
                 lambda page_id=page_id, payload=payload: notion.pages.update(page_id=page_id, properties=payload)
@@ -2557,17 +2629,11 @@ def _mark_failed_launch_status_for_notes(registros: List[RegistroNota], logger: 
             props = page.get("properties", {})
             status_prop_real = _resolve_existing_status_prop(props, status_prop)
             prop_info = props.get(status_prop_real, {})
-            ptype = prop_info.get("type")
-
-            if ptype == "select":
-                payload = {status_prop_real: {"select": {"name": "Falha"}}}
-            elif ptype == "checkbox":
-                payload = {status_prop_real: {"checkbox": False}}
-            elif ptype == "rich_text":
-                payload = {status_prop_real: {"rich_text": _make_rich_text("Falha")}}
-            else:
+            status_payload = _build_launch_status_payload(prop_info, success=False)
+            if status_payload is None:
                 falhas += 1
                 continue
+            payload = {status_prop_real: status_payload}
 
             _safe_notion_call(
                 lambda page_id=page_id, payload=payload: notion.pages.update(page_id=page_id, properties=payload)
