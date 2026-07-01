@@ -293,16 +293,48 @@ def _build_activity_status_map(database_obj: Optional[Dict]) -> Dict[str, str]:
         return {}
 
     prop_names = list(props.keys())
-    grade_columns = [name for name in prop_names if _is_probably_grade_column(name)]
+    grade_columns = [
+        name
+        for name in prop_names
+        if _is_probably_grade_property(name, props.get(name, {}))
+    ]
     status_columns = [name for name in prop_names if _normalize(name).startswith("status lancamento")]
+    status_positions = {name: idx for idx, name in enumerate(prop_names) if name in status_columns}
+    grade_positions = {name: idx for idx, name in enumerate(prop_names) if name in grade_columns}
 
     mapping: Dict[str, str] = {}
     for idx, col_name in enumerate(grade_columns, start=1):
         explicit = _status_prop_for_activity(col_name)
-        if explicit != "Status lancamento":
+        if explicit in status_columns:
             mapping[col_name] = explicit
             continue
 
+        # Prioriza o status que vem logo depois da atividade na ordem da database
+        # (layout esperado: Atividade N -> Data/Observacoes N -> Status lancamento N).
+        col_pos = grade_positions.get(col_name, -1)
+        next_grade_pos = min(
+            (p for n, p in grade_positions.items() if p > col_pos),
+            default=None,
+        )
+
+        status_ahead = [
+            (name, pos)
+            for name, pos in status_positions.items()
+            if pos > col_pos and (next_grade_pos is None or pos < next_grade_pos)
+        ]
+        if status_ahead:
+            status_ahead.sort(key=lambda item: item[1])
+            mapping[col_name] = status_ahead[0][0]
+            continue
+
+        # Se nao houver status entre atividades, pega o mais proximo apos a coluna.
+        status_after_any = [(name, pos) for name, pos in status_positions.items() if pos > col_pos]
+        if status_after_any:
+            status_after_any.sort(key=lambda item: item[1])
+            mapping[col_name] = status_after_any[0][0]
+            continue
+
+        # Fallback por sequencia (1..N).
         candidate = f"Status lancamento {idx}"
         if candidate in status_columns:
             mapping[col_name] = candidate
