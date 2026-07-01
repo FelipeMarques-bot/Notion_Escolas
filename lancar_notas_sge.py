@@ -331,48 +331,43 @@ def _build_activity_status_map(database_obj: Optional[Dict]) -> Dict[str, str]:
         if _is_probably_grade_column(name)
     ]
     status_columns = [name for name in prop_names if _normalize(name).startswith("status lancamento")]
-    status_positions = {name: idx for idx, name in enumerate(prop_names) if name in status_columns}
-    grade_positions = {name: idx for idx, name in enumerate(prop_names) if name in grade_columns}
+
+    status_by_seq: Dict[str, str] = {}
+    for status_name in status_columns:
+        m = re.search(r"(\d+)\s*$", _normalize(status_name))
+        if m:
+            status_by_seq[m.group(1)] = status_name
+
+    status_default = ""
+    for candidate in ["Status lancamento 1", "Status lançamento 1", "Status lancamento"]:
+        for real in status_columns:
+            if _normalize(real) == _normalize(candidate):
+                status_default = real
+                break
+        if status_default:
+            break
+    if not status_default and status_columns:
+        status_default = status_columns[0]
 
     mapping: Dict[str, str] = {}
-    for idx, col_name in enumerate(grade_columns, start=1):
+    for col_name in grade_columns:
         explicit = _status_prop_for_activity(col_name)
         if explicit in status_columns:
             mapping[col_name] = explicit
             continue
 
-        # Prioriza o status que vem logo depois da atividade na ordem da database
-        # (layout esperado: Atividade N -> Data/Observacoes N -> Status lancamento N).
-        col_pos = grade_positions.get(col_name, -1)
-        next_grade_pos = min(
-            (p for n, p in grade_positions.items() if p > col_pos),
-            default=None,
-        )
-
-        status_ahead = [
-            (name, pos)
-            for name, pos in status_positions.items()
-            if pos > col_pos and (next_grade_pos is None or pos < next_grade_pos)
-        ]
-        if status_ahead:
-            status_ahead.sort(key=lambda item: item[1])
-            mapping[col_name] = status_ahead[0][0]
+        n_col = _normalize(col_name)
+        seq_match = re.search(r"(\d+)\s*$", n_col)
+        if seq_match and seq_match.group(1) in status_by_seq:
+            mapping[col_name] = status_by_seq[seq_match.group(1)]
             continue
 
-        # Se nao houver status entre atividades, pega o mais proximo apos a coluna.
-        status_after_any = [(name, pos) for name, pos in status_positions.items() if pos > col_pos]
-        if status_after_any:
-            status_after_any.sort(key=lambda item: item[1])
-            mapping[col_name] = status_after_any[0][0]
+        # Heuristica pragmatica: atividade sem sufixo tende a ser a avaliacao 1.
+        if "1" in status_by_seq:
+            mapping[col_name] = status_by_seq["1"]
             continue
 
-        # Fallback por sequencia (1..N).
-        candidate = f"Status lancamento {idx}"
-        if candidate in status_columns:
-            mapping[col_name] = candidate
-            continue
-
-        mapping[col_name] = "Status lancamento"
+        mapping[col_name] = status_default or "Status lancamento"
 
     return mapping
 
@@ -1217,6 +1212,7 @@ def carregar_notas_notion(
     invalid_notes_by_col: Dict[str, int] = defaultdict(int)
     parsed_notes_by_col: Dict[str, int] = defaultdict(int)
     non_empty_values_by_col: Dict[str, int] = defaultdict(int)
+    missing_students_by_col: Dict[str, List[str]] = defaultdict(list)
     samples_invalid_by_col: Dict[str, List[str]] = defaultdict(list)
     candidatos: List[Dict[str, Any]] = []
 
@@ -1367,6 +1363,8 @@ def carregar_notas_notion(
                         invalid_notes_by_col[col_name.strip()] += 1
                         if len(samples_invalid_by_col[col_name.strip()]) < 5:
                             samples_invalid_by_col[col_name.strip()].append(str(raw_nota).strip())
+                    else:
+                        missing_students_by_col[col_name.strip()].append(aluno)
                     continue
 
                 status_prop = activity_status_map.get(col_name.strip(), _status_prop_for_activity(col_name.strip()))
@@ -1407,6 +1405,14 @@ def carregar_notas_notion(
     if samples_invalid_by_col:
         for col_name, samples in sorted(samples_invalid_by_col.items()):
             _log(logger, f"Diagnostico: exemplos invalidos em '{col_name}': {samples}")
+
+    if missing_students_by_col:
+        for col_name, students in sorted(missing_students_by_col.items()):
+            if not students:
+                continue
+            preview = ", ".join(students[:12])
+            extra = "" if len(students) <= 12 else f" (+{len(students)-12})"
+            _log(logger, f"Diagnostico: alunos sem nota em '{col_name}': {len(students)} -> {preview}{extra}")
 
     _log(logger, f"Total de notas carregadas do Notion: {len(registros)}")
     return registros
