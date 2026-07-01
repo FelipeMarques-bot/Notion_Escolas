@@ -416,6 +416,47 @@ def _database_property_descriptors(database_obj: Optional[Dict]) -> List[Dict[st
     return out
 
 
+def _resolve_prop_for_descriptor(props: Dict[str, Any], desc: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(props, dict):
+        return {}
+
+    lookup_keys = [str(k).strip() for k in desc.get("lookup_keys", []) if str(k).strip()]
+    for key in lookup_keys:
+        if key in props:
+            return props.get(key, {}) or {}
+
+    normalized_keys = set()
+    for key in lookup_keys:
+        normalized_keys.add(key)
+        normalized_keys.add(unquote(key))
+        normalized_keys.add(_normalize(key))
+        normalized_keys.add(_normalize(unquote(key)))
+
+    # Fallback por id da propriedade presente no payload da pagina.
+    for prop in props.values():
+        if not isinstance(prop, dict):
+            continue
+        pid = str(prop.get("id", "")).strip()
+        if not pid:
+            continue
+        if (
+            pid in normalized_keys
+            or unquote(pid) in normalized_keys
+            or _normalize(pid) in normalized_keys
+            or _normalize(unquote(pid)) in normalized_keys
+        ):
+            return prop
+
+    # Fallback final por nome normalizado.
+    target_name = _normalize(str(desc.get("name", "")))
+    if target_name:
+        for key, prop in props.items():
+            if _normalize(str(key)) == target_name:
+                return prop if isinstance(prop, dict) else {}
+
+    return {}
+
+
 def _resolve_existing_status_prop(props: Dict[str, Dict], preferred: str) -> str:
     alvo = (preferred or "").strip()
     if not alvo:
@@ -1260,6 +1301,21 @@ def carregar_notas_notion(
         activity_status_map = _build_activity_status_map(item.get("db_obj"))
         descriptors = _database_property_descriptors(item.get("db_obj"))
         grade_descriptors = [d for d in descriptors if _is_probably_grade_property(str(d.get("name", "")), {"type": d.get("type")})]
+
+        # Fallback: se o schema nao trouxe nomes amigaveis, tenta derivar pelas
+        # colunas retornadas em uma linha hidratada.
+        if not grade_descriptors and rows:
+            sample_props = rows[0].get("properties", {}) if isinstance(rows[0], dict) else {}
+            if isinstance(sample_props, dict):
+                grade_descriptors = [
+                    {
+                        "name": str(k),
+                        "type": (v or {}).get("type") if isinstance(v, dict) else None,
+                        "lookup_keys": [str(k)],
+                    }
+                    for k, v in sample_props.items()
+                    if _is_probably_grade_property(str(k), v if isinstance(v, dict) else {})
+                ]
         _log(logger, f"Database {title}: {len(rows)} alunos encontrados")
         if logger:
             grade_schema = []
@@ -1267,6 +1323,8 @@ def carregar_notas_notion(
                 grade_schema.append(f"{desc.get('name')}<{desc.get('type', '?')}>")
             if grade_schema:
                 _log(logger, f"Diagnostico: colunas de nota detectadas no schema: {', '.join(grade_schema)}")
+            else:
+                _log(logger, "Diagnostico: nenhuma coluna de nota detectada no schema para esta database.")
 
         for row in rows:
             page_id = row.get("id", "")
@@ -1300,11 +1358,7 @@ def carregar_notas_notion(
                 col_name = str(desc.get("name", "")).strip()
                 if not col_name:
                     continue
-                prop = {}
-                for key in desc.get("lookup_keys", []):
-                    if key in props:
-                        prop = props.get(key, {})
-                        break
+                prop = _resolve_prop_for_descriptor(props, desc)
 
                 raw_nota, nota = _extract_grade_value(prop)
                 if nota is None:
