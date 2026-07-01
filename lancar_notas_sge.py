@@ -320,11 +320,15 @@ def _build_activity_status_map(database_obj: Optional[Dict]) -> Dict[str, str]:
     if not isinstance(props, dict):
         return {}
 
-    prop_names = list(props.keys())
+    prop_names: List[str] = []
+    for key, pinfo in props.items():
+        pname = str((pinfo or {}).get("name", "")).strip() or str(key).strip()
+        prop_names.append(pname)
+
     grade_columns = [
         name
         for name in prop_names
-        if _is_probably_grade_property(name, props.get(name, {}))
+        if _is_probably_grade_column(name)
     ]
     status_columns = [name for name in prop_names if _normalize(name).startswith("status lancamento")]
     status_positions = {name: idx for idx, name in enumerate(prop_names) if name in status_columns}
@@ -371,6 +375,28 @@ def _build_activity_status_map(database_obj: Optional[Dict]) -> Dict[str, str]:
         mapping[col_name] = "Status lancamento"
 
     return mapping
+
+
+def _database_property_descriptors(database_obj: Optional[Dict]) -> List[Dict[str, Any]]:
+    props = (database_obj or {}).get("properties", {}) or {}
+    if not isinstance(props, dict):
+        return []
+
+    out: List[Dict[str, Any]] = []
+    for key, pinfo in props.items():
+        info = pinfo or {}
+        pname = str(info.get("name", "")).strip() or str(key).strip()
+        lookup_keys = [pname]
+        if str(key).strip() and str(key).strip() != pname:
+            lookup_keys.append(str(key).strip())
+        out.append(
+            {
+                "name": pname,
+                "type": info.get("type"),
+                "lookup_keys": lookup_keys,
+            }
+        )
+    return out
 
 
 def _resolve_existing_status_prop(props: Dict[str, Dict], preferred: str) -> str:
@@ -1190,13 +1216,13 @@ def carregar_notas_notion(
         context = item["context"]
         rows = item["rows"]
         activity_status_map = _build_activity_status_map(item.get("db_obj"))
+        descriptors = _database_property_descriptors(item.get("db_obj"))
+        grade_descriptors = [d for d in descriptors if _is_probably_grade_property(str(d.get("name", "")), {"type": d.get("type")})]
         _log(logger, f"Database {title}: {len(rows)} alunos encontrados")
         if logger:
-            db_props = (item.get("db_obj") or {}).get("properties", {}) or {}
             grade_schema = []
-            for pname, pinfo in db_props.items():
-                if _is_probably_grade_property(pname, pinfo):
-                    grade_schema.append(f"{pname}<{(pinfo or {}).get('type', '?')}>")
+            for desc in grade_descriptors:
+                grade_schema.append(f"{desc.get('name')}<{desc.get('type', '?')}>")
             if grade_schema:
                 _log(logger, f"Diagnostico: colunas de nota detectadas no schema: {', '.join(grade_schema)}")
 
@@ -1228,13 +1254,16 @@ def carregar_notas_notion(
             if not _is_non_empty(aluno):
                 continue
 
-            db_props = (item.get("db_obj") or {}).get("properties", {}) or {}
-            grade_columns = [name for name, p in db_props.items() if _is_probably_grade_property(name, p)]
-
-            for col_name in grade_columns:
-                prop = props.get(col_name, {})
-                if not _is_probably_grade_property(col_name, prop if prop else db_props.get(col_name, {})):
+            for desc in grade_descriptors:
+                col_name = str(desc.get("name", "")).strip()
+                if not col_name:
                     continue
+                prop = {}
+                for key in desc.get("lookup_keys", []):
+                    if key in props:
+                        prop = props.get(key, {})
+                        break
+
                 raw_nota, nota = _extract_grade_value(prop)
                 if nota is None:
                     if _is_non_empty(raw_nota):
