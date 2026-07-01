@@ -10,7 +10,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from notion_client import Client
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -387,8 +387,25 @@ def _database_property_descriptors(database_obj: Optional[Dict]) -> List[Dict[st
         info = pinfo or {}
         pname = str(info.get("name", "")).strip() or str(key).strip()
         lookup_keys = [pname]
-        if str(key).strip() and str(key).strip() != pname:
-            lookup_keys.append(str(key).strip())
+
+        raw_key = str(key).strip()
+        if raw_key and raw_key != pname:
+            lookup_keys.append(raw_key)
+
+        prop_id = str(info.get("id", "")).strip()
+        if prop_id and prop_id != pname:
+            lookup_keys.append(prop_id)
+
+        for value in (raw_key, prop_id):
+            if not value:
+                continue
+            decoded = unquote(value).strip()
+            if decoded and decoded not in lookup_keys:
+                lookup_keys.append(decoded)
+
+        seen = set()
+        lookup_keys = [k for k in lookup_keys if k and not (k in seen or seen.add(k))]
+
         out.append(
             {
                 "name": pname,
@@ -1061,13 +1078,38 @@ def _is_probably_grade_column(col_name: str) -> bool:
     clean = col_name.strip()
     if not clean or clean in IGNORE_COLS:
         return False
-    lowered = clean.lower()
-    blacklist = ["status", "media", "obs", "coment", "nome", "id", "chamada", "frequencia"]
-    return all(word not in lowered for word in blacklist)
+
+    # Colunas com prefixo numerico normalmente sao atividades avaliativas.
+    if re.match(r"^\d+\s*[-–]\s*", clean):
+        return True
+
+    tokens = set(_normalize_loose(clean).split())
+    blocked_tokens = {
+        "status",
+        "media",
+        "obs",
+        "observacao",
+        "observacoes",
+        "nome",
+        "id",
+        "chamada",
+        "frequencia",
+        "data",
+        "realizacao",
+        "ultima",
+        "atualizacao",
+    }
+    if tokens.intersection(blocked_tokens):
+        return False
+
+    return True
 
 
 def _is_probably_grade_property(col_name: str, prop: Dict[str, Any]) -> bool:
     ptype = (prop or {}).get("type")
+
+    if not ptype:
+        return _is_probably_grade_column(col_name)
 
     # Exclui tipos claramente nao numericos para evitar ruido (ex.: coluna Name/title).
     if ptype in {
