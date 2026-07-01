@@ -69,6 +69,7 @@ TRIMESTRES_KNOWN = [
 ]
 
 IGNORE_COLS = {
+    "Name",
     "Nome",
     "Status",
     "Status Fluxo",
@@ -903,6 +904,33 @@ def _is_probably_grade_column(col_name: str) -> bool:
     return all(word not in lowered for word in blacklist)
 
 
+def _is_probably_grade_property(col_name: str, prop: Dict[str, Any]) -> bool:
+    ptype = (prop or {}).get("type")
+
+    # Exclui tipos claramente nao numericos para evitar ruido (ex.: coluna Name/title).
+    if ptype in {
+        "title",
+        "date",
+        "last_edited_time",
+        "created_time",
+        "created_by",
+        "last_edited_by",
+        "people",
+        "files",
+        "relation",
+        "rollup",
+        "url",
+        "email",
+        "phone_number",
+    }:
+        return False
+
+    if ptype not in {"rich_text", "number", "formula", "select", "status"}:
+        return False
+
+    return _is_probably_grade_column(col_name)
+
+
 def _context_matches_filter(context: ContextoTurma, filtro: Optional[Dict[str, str]]) -> bool:
     if not filtro:
         return True
@@ -939,6 +967,8 @@ def carregar_notas_notion(
 
     registros: List[RegistroNota] = []
     invalid_notes_by_col: Dict[str, int] = defaultdict(int)
+    parsed_notes_by_col: Dict[str, int] = defaultdict(int)
+    samples_invalid_by_col: Dict[str, List[str]] = defaultdict(list)
     candidatos: List[Dict[str, Any]] = []
 
     for db_id, breadcrumb, db_title in databases:
@@ -1039,16 +1069,19 @@ def carregar_notas_notion(
                 continue
 
             for col_name, prop in props.items():
-                if not _is_probably_grade_column(col_name):
+                if not _is_probably_grade_property(col_name, prop):
                     continue
                 raw_nota = _extract_plain_text(prop)
                 nota = _to_float(raw_nota)
                 if nota is None:
                     if _is_non_empty(raw_nota):
                         invalid_notes_by_col[col_name.strip()] += 1
+                        if len(samples_invalid_by_col[col_name.strip()]) < 5:
+                            samples_invalid_by_col[col_name.strip()].append(str(raw_nota).strip())
                     continue
 
                 status_prop = activity_status_map.get(col_name.strip(), _status_prop_for_activity(col_name.strip()))
+                parsed_notes_by_col[col_name.strip()] += 1
 
                 registros.append(
                     RegistroNota(
@@ -1071,6 +1104,14 @@ def carregar_notas_notion(
     if invalid_notes_by_col:
         resumo_invalid = ", ".join(f"{k}: {v}" for k, v in sorted(invalid_notes_by_col.items()))
         _log(logger, f"Aviso: valores de nota nao numericos ignorados em colunas: {resumo_invalid}")
+
+    if parsed_notes_by_col:
+        resumo_parsed = ", ".join(f"{k}: {v}" for k, v in sorted(parsed_notes_by_col.items()))
+        _log(logger, f"Diagnostico: notas validas por coluna: {resumo_parsed}")
+
+    if samples_invalid_by_col:
+        for col_name, samples in sorted(samples_invalid_by_col.items()):
+            _log(logger, f"Diagnostico: exemplos invalidos em '{col_name}': {samples}")
 
     _log(logger, f"Total de notas carregadas do Notion: {len(registros)}")
     return registros
