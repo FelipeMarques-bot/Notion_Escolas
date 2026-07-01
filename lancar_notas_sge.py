@@ -1298,20 +1298,46 @@ def carregar_notas_notion(
         descriptors = _database_property_descriptors(item.get("db_obj"))
         grade_descriptors = [d for d in descriptors if _is_probably_grade_property(str(d.get("name", "")), {"type": d.get("type")})]
 
-        # Fallback: se o schema nao trouxe nomes amigaveis, tenta derivar pelas
-        # colunas retornadas em uma linha hidratada.
-        if not grade_descriptors and rows:
-            sample_props = rows[0].get("properties", {}) if isinstance(rows[0], dict) else {}
-            if isinstance(sample_props, dict):
-                grade_descriptors = [
+        # Complementa com colunas derivadas de uma linha hidratada para cobrir
+        # casos em que o metadata da database vem incompleto/desalinhado.
+        sample_props: Dict[str, Any] = {}
+        if rows:
+            first_row = rows[0] if isinstance(rows[0], dict) else {}
+            first_page_id = str(first_row.get("id", "")).strip()
+            sample_props = first_row.get("properties", {}) if isinstance(first_row.get("properties", {}), dict) else {}
+            if first_page_id:
+                try:
+                    sample_full = _safe_notion_call(lambda page_id=first_page_id: notion.pages.retrieve(page_id=page_id))
+                    sample_props = sample_full.get("properties", {}) or sample_props
+                except Exception:  # noqa: BLE001
+                    pass
+
+        if isinstance(sample_props, dict) and sample_props:
+            existing = {_normalize(str(d.get("name", ""))) for d in grade_descriptors}
+            for k, v in sample_props.items():
+                pinfo = v if isinstance(v, dict) else {}
+                pname = str(k).strip()
+                if not _is_probably_grade_property(pname, pinfo):
+                    continue
+                if _normalize(pname) in existing:
+                    continue
+
+                pid = str(pinfo.get("id", "")).strip()
+                lookup_keys = [pname]
+                if pid and pid != pname:
+                    lookup_keys.append(pid)
+                decoded_pid = unquote(pid).strip() if pid else ""
+                if decoded_pid and decoded_pid not in lookup_keys:
+                    lookup_keys.append(decoded_pid)
+
+                grade_descriptors.append(
                     {
-                        "name": str(k),
-                        "type": (v or {}).get("type") if isinstance(v, dict) else None,
-                        "lookup_keys": [str(k)],
+                        "name": pname,
+                        "type": pinfo.get("type"),
+                        "lookup_keys": lookup_keys,
                     }
-                    for k, v in sample_props.items()
-                    if _is_probably_grade_property(str(k), v if isinstance(v, dict) else {})
-                ]
+                )
+                existing.add(_normalize(pname))
         _log(logger, f"Database {title}: {len(rows)} alunos encontrados")
         if logger:
             grade_schema = []
