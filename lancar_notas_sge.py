@@ -393,6 +393,39 @@ def _resolve_existing_status_prop(props: Dict[str, Dict], preferred: str) -> str
     return preferred
 
 
+def _status_prop_candidates(props: Dict[str, Dict], preferred: str) -> List[str]:
+    alvo = (preferred or "").strip()
+    normalized_target = _normalize(alvo)
+
+    candidates: List[str] = []
+    for name in props.keys():
+        n = _normalize(name)
+        if normalized_target and n == normalized_target:
+            candidates.append(name)
+
+    # Fallback por prefixo de status lancamento e sequencia 1/2/3.
+    seq_match = re.search(r"(\d+)\s*$", normalized_target)
+    seq = seq_match.group(1) if seq_match else ""
+    for name in props.keys():
+        n = _normalize(name)
+        if not n.startswith("status lancamento"):
+            continue
+        if seq and n.endswith(seq):
+            candidates.append(name)
+        elif not seq:
+            candidates.append(name)
+
+    # Mantem ordem sem duplicar.
+    seen = set()
+    uniq = []
+    for item in candidates:
+        if item in seen:
+            continue
+        seen.add(item)
+        uniq.append(item)
+    return uniq
+
+
 def _pick_status_name(prop_info: Dict[str, Any], desired_names: List[str]) -> Optional[str]:
     ptype = (prop_info or {}).get("type")
     node = (prop_info or {}).get(ptype, {}) if ptype in {"select", "status"} else {}
@@ -1157,7 +1190,19 @@ def carregar_notas_notion(
         _log(logger, f"Database {title}: {len(rows)} alunos encontrados")
 
         for row in rows:
+            page_id = row.get("id", "")
             props = row.get("properties", {})
+
+            # Em alguns cenarios, databases.query retorna propriedades parciais
+            # e parte das notas pode vir vazia mesmo aparecendo no Notion.
+            # Re-hidratamos cada linha com pages.retrieve para garantir leitura
+            # completa dos valores antes da extracao.
+            if page_id:
+                try:
+                    row_full = _safe_notion_call(lambda page_id=page_id: notion.pages.retrieve(page_id=page_id))
+                    props = row_full.get("properties", {}) or props
+                except Exception as exc:  # noqa: BLE001
+                    _log(logger, f"Aviso: falha ao hidratar pagina {page_id}; usando dados parciais ({exc})")
 
             aluno = ""
             if "Nome" in props:
@@ -1198,7 +1243,7 @@ def carregar_notas_notion(
                         aluno=aluno,
                         atividade=col_name.strip(),
                         nota=nota,
-                        notion_page_id=row.get("id", ""),
+                        notion_page_id=page_id,
                         notion_status_prop=status_prop,
                     )
                 )
@@ -2582,14 +2627,24 @@ def _update_launch_status_for_notes(registros: List[RegistroNota], logger: Optio
         try:
             page = _safe_notion_call(lambda page_id=page_id: notion.pages.retrieve(page_id=page_id))
             props = page.get("properties", {})
-            status_prop_real = _resolve_existing_status_prop(props, status_prop)
-            prop_info = props.get(status_prop_real, {})
-            status_payload = _build_launch_status_payload(prop_info, success=True)
-            if status_payload is None:
+            status_targets = _status_prop_candidates(props, _resolve_existing_status_prop(props, status_prop))
+            if not status_targets:
                 _log(logger, f"Aviso: propriedade de status nao encontrada/compativel para {reg.aluno}: {status_prop}")
                 falhas += 1
                 continue
-            payload = {status_prop_real: status_payload}
+
+            payload = {}
+            for status_prop_real in status_targets:
+                prop_info = props.get(status_prop_real, {})
+                status_payload = _build_launch_status_payload(prop_info, success=True)
+                if status_payload is None:
+                    continue
+                payload[status_prop_real] = status_payload
+
+            if not payload:
+                _log(logger, f"Aviso: propriedade de status nao encontrada/compativel para {reg.aluno}: {status_prop}")
+                falhas += 1
+                continue
 
             _safe_notion_call(
                 lambda page_id=page_id, payload=payload: notion.pages.update(page_id=page_id, properties=payload)
@@ -2627,13 +2682,22 @@ def _mark_failed_launch_status_for_notes(registros: List[RegistroNota], logger: 
         try:
             page = _safe_notion_call(lambda page_id=page_id: notion.pages.retrieve(page_id=page_id))
             props = page.get("properties", {})
-            status_prop_real = _resolve_existing_status_prop(props, status_prop)
-            prop_info = props.get(status_prop_real, {})
-            status_payload = _build_launch_status_payload(prop_info, success=False)
-            if status_payload is None:
+            status_targets = _status_prop_candidates(props, _resolve_existing_status_prop(props, status_prop))
+            if not status_targets:
                 falhas += 1
                 continue
-            payload = {status_prop_real: status_payload}
+
+            payload = {}
+            for status_prop_real in status_targets:
+                prop_info = props.get(status_prop_real, {})
+                status_payload = _build_launch_status_payload(prop_info, success=False)
+                if status_payload is None:
+                    continue
+                payload[status_prop_real] = status_payload
+
+            if not payload:
+                falhas += 1
+                continue
 
             _safe_notion_call(
                 lambda page_id=page_id, payload=payload: notion.pages.update(page_id=page_id, properties=payload)
