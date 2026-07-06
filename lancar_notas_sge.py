@@ -897,7 +897,7 @@ def _is_notas_database(title: str) -> bool:
     # - "Notas Escolas - ..."
     # - "Notas Escola - ..."
     # - "📊 Notas Escolas ..."
-    if "notas escola" not in normalized:
+    if not re.search(r"notas\s+escolas?", normalized):
         return False
 
     # Espera algum indicativo de periodo/turma para evitar falso positivo.
