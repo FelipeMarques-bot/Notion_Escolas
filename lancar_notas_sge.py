@@ -2783,48 +2783,66 @@ def _update_launch_status_for_notes(registros: List[RegistroNota], logger: Optio
     notion = Client(auth=NOTION_TOKEN)
     atualizados = 0
     falhas = 0
-    vistos = set()
-
+    
+    # Agrupa registros por page_id para evitar múltiplas chamadas à API
+    # e garantir que todas as notas da mesma página tenham seus status atualizados
+    registros_por_page: Dict[str, List[RegistroNota]] = {}
     for reg in registros:
         page_id = _normalize_notion_id(reg.notion_page_id)
         status_prop = (reg.notion_status_prop or "").strip()
         if not page_id or not status_prop:
             continue
+        if page_id not in registros_por_page:
+            registros_por_page[page_id] = []
+        registros_por_page[page_id].append(reg)
 
-        chave = (page_id, status_prop)
-        if chave in vistos:
-            continue
-        vistos.add(chave)
-
+    for page_id, regs_pagina in registros_por_page.items():
         try:
             page = _safe_notion_call(lambda page_id=page_id: notion.pages.retrieve(page_id=page_id))
             props = page.get("properties", {})
-            status_targets = _status_prop_candidates(props, _resolve_existing_status_prop(props, status_prop))
-            if not status_targets:
-                _log(logger, f"Aviso: propriedade de status nao encontrada/compativel para {reg.aluno}: {status_prop}")
-                falhas += 1
-                continue
-
+            
             payload = {}
-            for status_prop_real in status_targets:
-                prop_info = props.get(status_prop_real, {})
-                status_payload = _build_launch_status_payload(prop_info, success=True)
-                if status_payload is None:
+            regs_atualizadas = 0
+            
+            # Processa todos os registros da mesma página, acumulando os status_props
+            for reg in regs_pagina:
+                status_prop = (reg.notion_status_prop or "").strip()
+                if not status_prop:
                     continue
-                payload[status_prop_real] = status_payload
+                    
+                status_targets = _status_prop_candidates(props, _resolve_existing_status_prop(props, status_prop))
+                if not status_targets:
+                    _log(logger, f"Aviso: propriedade de status nao encontrada/compativel para {reg.aluno}: {status_prop}")
+                    falhas += 1
+                    continue
 
-            if not payload:
-                _log(logger, f"Aviso: propriedade de status nao encontrada/compativel para {reg.aluno}: {status_prop}")
-                falhas += 1
-                continue
+                prop_adicionado = False
+                for status_prop_real in status_targets:
+                    if status_prop_real in payload:
+                        prop_adicionado = True
+                        break
+                    prop_info = props.get(status_prop_real, {})
+                    status_payload = _build_launch_status_payload(prop_info, success=True)
+                    if status_payload is None:
+                        continue
+                    payload[status_prop_real] = status_payload
+                    prop_adicionado = True
+                    break
 
-            _safe_notion_call(
-                lambda page_id=page_id, payload=payload: notion.pages.update(page_id=page_id, properties=payload)
-            )
-            atualizados += 1
+                if prop_adicionado:
+                    regs_atualizadas += 1
+                else:
+                    _log(logger, f"Aviso: propriedade de status nao encontrada/compativel para {reg.aluno}: {status_prop}")
+                    falhas += 1
+
+            if payload:
+                _safe_notion_call(
+                    lambda page_id=page_id, payload=payload: notion.pages.update(page_id=page_id, properties=payload)
+                )
+                atualizados += regs_atualizadas
         except Exception as exc:  # noqa: BLE001
-            falhas += 1
-            _log(logger, f"Aviso: falha ao atualizar status de lancamento ({reg.aluno}): {exc}")
+            falhas += len(regs_pagina)
+            _log(logger, f"Aviso: falha ao atualizar status de lancamento: {exc}")
 
     _log(logger, f"Status de lancamento atualizado em {atualizados} nota(s). Falhas: {falhas}")
 
@@ -2838,45 +2856,63 @@ def _mark_failed_launch_status_for_notes(registros: List[RegistroNota], logger: 
     notion = Client(auth=NOTION_TOKEN)
     atualizados = 0
     falhas = 0
-    vistos = set()
-
+    
+    # Agrupa registros por page_id para evitar múltiplas chamadas à API
+    # e garantir que todas as notas da mesma página tenham seus status atualizados
+    registros_por_page: Dict[str, List[RegistroNota]] = {}
     for reg in registros:
         page_id = _normalize_notion_id(reg.notion_page_id)
         status_prop = (reg.notion_status_prop or "").strip()
         if not page_id or not status_prop:
             continue
+        if page_id not in registros_por_page:
+            registros_por_page[page_id] = []
+        registros_por_page[page_id].append(reg)
 
-        chave = (page_id, status_prop)
-        if chave in vistos:
-            continue
-        vistos.add(chave)
-
+    for page_id, regs_pagina in registros_por_page.items():
         try:
             page = _safe_notion_call(lambda page_id=page_id: notion.pages.retrieve(page_id=page_id))
             props = page.get("properties", {})
-            status_targets = _status_prop_candidates(props, _resolve_existing_status_prop(props, status_prop))
-            if not status_targets:
-                falhas += 1
-                continue
-
+            
             payload = {}
-            for status_prop_real in status_targets:
-                prop_info = props.get(status_prop_real, {})
-                status_payload = _build_launch_status_payload(prop_info, success=False)
-                if status_payload is None:
+            regs_atualizadas = 0
+            
+            # Processa todos os registros da mesma página, acumulando os status_props
+            for reg in regs_pagina:
+                status_prop = (reg.notion_status_prop or "").strip()
+                if not status_prop:
                     continue
-                payload[status_prop_real] = status_payload
+                    
+                status_targets = _status_prop_candidates(props, _resolve_existing_status_prop(props, status_prop))
+                if not status_targets:
+                    falhas += 1
+                    continue
 
-            if not payload:
-                falhas += 1
-                continue
+                prop_adicionado = False
+                for status_prop_real in status_targets:
+                    if status_prop_real in payload:
+                        prop_adicionado = True
+                        break
+                    prop_info = props.get(status_prop_real, {})
+                    status_payload = _build_launch_status_payload(prop_info, success=False)
+                    if status_payload is None:
+                        continue
+                    payload[status_prop_real] = status_payload
+                    prop_adicionado = True
+                    break
 
-            _safe_notion_call(
-                lambda page_id=page_id, payload=payload: notion.pages.update(page_id=page_id, properties=payload)
-            )
-            atualizados += 1
+                if prop_adicionado:
+                    regs_atualizadas += 1
+                else:
+                    falhas += 1
+
+            if payload:
+                _safe_notion_call(
+                    lambda page_id=page_id, payload=payload: notion.pages.update(page_id=page_id, properties=payload)
+                )
+                atualizados += regs_atualizadas
         except Exception:  # noqa: BLE001
-            falhas += 1
+            falhas += len(regs_pagina)
 
     _log(logger, f"Status de falha atualizado em {atualizados} nota(s). Falhas: {falhas}")
 
