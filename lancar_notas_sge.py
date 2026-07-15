@@ -50,7 +50,7 @@ MANUAL_LOGIN_TIMEOUT_SEC = int(os.environ.get("MANUAL_LOGIN_TIMEOUT_SEC", "300")
 DEBUG_LOGIN = os.environ.get("SGE_DEBUG_LOGIN", "1" if os.environ.get("GITHUB_ACTIONS") == "true" else "0") == "1"
 DEBUG_OUTPUT_DIR = os.environ.get("SGE_DEBUG_DIR", "artifacts/sge-login")
 DEBUG_SCAN_DATABASES = os.environ.get("SGE_DEBUG_SCAN_DATABASES", "0") == "1"
-STRICT_NOTION_NOTES = os.environ.get("STRICT_NOTION_NOTES", "1") == "1"
+STRICT_NOTION_NOTES = os.environ.get("STRICT_NOTION_NOTES", "0") == "1"
 NOTION_STATUS_PROP = os.environ.get("NOTION_STATUS_PROP", "Status lancamento")
 NOTION_LAST_RUN_PROP = os.environ.get("NOTION_LAST_RUN_PROP", "Ultima execucao")
 NOTION_LAUNCH_DATE_PROP = os.environ.get("NOTION_LAUNCH_DATE_PROP", "Data lancamento")
@@ -92,6 +92,9 @@ class RegistroNota:
     nota: float
     notion_page_id: str = ""
     notion_status_prop: str = ""
+    notion_status_value: str = ""
+    notion_date_prop: str = ""
+    notion_date_value: str = ""
 
 
 @dataclass
@@ -371,6 +374,42 @@ def _build_activity_status_map(database_obj: Optional[Dict]) -> Dict[str, str]:
         mapping[col_name] = status_default or "Status lancamento"
 
     return mapping
+
+
+def _build_activity_date_map(database_obj: Optional[Dict]) -> Dict[str, str]:
+    if not database_obj:
+        return {}
+
+    props = database_obj.get("properties", {}) or {}
+    if not isinstance(props, dict):
+        return {}
+
+    prop_names: List[str] = []
+    for key, pinfo in props.items():
+        pname = str((pinfo or {}).get("name", "")).strip() or str(key).strip()
+        prop_names.append(pname)
+
+    grade_columns = [name for name in prop_names if _is_probably_grade_column(name)]
+    date_columns = [name for name in prop_names if _normalize(name).startswith("data realizacao")]
+
+    date_by_seq: Dict[str, str] = {}
+    for date_name in date_columns:
+        m = re.search(r"(\d+)\s*$", _normalize(date_name))
+        if m:
+            date_by_seq[m.group(1)] = date_name
+
+    mapping: Dict[str, str] = {}
+    for idx, col_name in enumerate(grade_columns, start=1):
+        m = re.search(r"(\d+)\s*$", _normalize(col_name))
+        seq = m.group(1) if m else str(idx)
+        if seq in date_by_seq:
+            mapping[col_name] = date_by_seq[seq]
+    return mapping
+
+
+def _is_launched_status(value: str) -> bool:
+    normalized = _normalize(value or "")
+    return normalized in {"lancada", "concluido", "concluida", "ok", "done"}
 
 
 def _database_property_descriptors(database_obj: Optional[Dict]) -> List[Dict[str, Any]]:
@@ -859,6 +898,12 @@ def _extract_plain_text(prop: Dict) -> str:
     if ptype == "select":
         node = prop.get("select")
         return "" if not node else node.get("name", "")
+    if ptype == "status":
+        node = prop.get("status")
+        return "" if not node else node.get("name", "")
+    if ptype == "date":
+        node = prop.get("date") or {}
+        return str(node.get("start", "") or "")
     if ptype == "formula":
         formula = prop.get("formula", {})
         ftype = formula.get("type")
@@ -1297,6 +1342,7 @@ def carregar_notas_notion(
         context = item["context"]
         rows = item["rows"]
         activity_status_map = _build_activity_status_map(item.get("db_obj"))
+        activity_date_map = _build_activity_date_map(item.get("db_obj"))
         descriptors = _database_property_descriptors(item.get("db_obj"))
         grade_descriptors = [d for d in descriptors if _is_probably_grade_property(str(d.get("name", "")), {"type": d.get("type")})]
 
@@ -1385,6 +1431,23 @@ def carregar_notas_notion(
                 rows_by_col[col_name] += 1
                 prop = _resolve_prop_for_descriptor(props, desc)
 
+                status_prop = activity_status_map.get(col_name.strip(), _status_prop_for_activity(col_name.strip()))
+                status_prop_payload = _resolve_prop_for_descriptor(
+                    props,
+                    {"name": status_prop, "lookup_keys": [status_prop]},
+                )
+                status_value = _extract_plain_text(status_prop_payload).strip()
+
+                date_prop = activity_date_map.get(col_name.strip(), "")
+                date_prop_payload = _resolve_prop_for_descriptor(
+                    props,
+                    {"name": date_prop, "lookup_keys": [date_prop]} if date_prop else {"name": "", "lookup_keys": []},
+                )
+                date_value = _extract_plain_text(date_prop_payload).strip()
+
+                if _is_launched_status(status_value):
+                    continue
+
                 raw_nota, nota = _extract_grade_value(prop)
                 if nota is None:
                     if _is_non_empty(raw_nota):
@@ -1396,7 +1459,6 @@ def carregar_notas_notion(
                         missing_students_by_col[col_name.strip()].append(aluno)
                     continue
 
-                status_prop = activity_status_map.get(col_name.strip(), _status_prop_for_activity(col_name.strip()))
                 parsed_notes_by_col[col_name.strip()] += 1
                 if _is_non_empty(raw_nota):
                     non_empty_values_by_col[col_name.strip()] += 1
@@ -1412,6 +1474,9 @@ def carregar_notas_notion(
                         nota=nota,
                         notion_page_id=page_id,
                         notion_status_prop=status_prop,
+                        notion_status_value=status_value,
+                        notion_date_prop=date_prop,
+                        notion_date_value=date_value,
                     )
                 )
 
