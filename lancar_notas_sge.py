@@ -50,6 +50,7 @@ MANUAL_LOGIN_TIMEOUT_SEC = int(os.environ.get("MANUAL_LOGIN_TIMEOUT_SEC", "300")
 DEBUG_LOGIN = os.environ.get("SGE_DEBUG_LOGIN", "1" if os.environ.get("GITHUB_ACTIONS") == "true" else "0") == "1"
 DEBUG_OUTPUT_DIR = os.environ.get("SGE_DEBUG_DIR", "artifacts/sge-login")
 DEBUG_SCAN_DATABASES = os.environ.get("SGE_DEBUG_SCAN_DATABASES", "0") == "1"
+STRICT_NOTION_NOTES = os.environ.get("STRICT_NOTION_NOTES", "1") == "1"
 NOTION_STATUS_PROP = os.environ.get("NOTION_STATUS_PROP", "Status lancamento")
 NOTION_LAST_RUN_PROP = os.environ.get("NOTION_LAST_RUN_PROP", "Ultima execucao")
 NOTION_LAUNCH_DATE_PROP = os.environ.get("NOTION_LAUNCH_DATE_PROP", "Data lancamento")
@@ -1213,6 +1214,7 @@ def carregar_notas_notion(
     parsed_notes_by_col: Dict[str, int] = defaultdict(int)
     non_empty_values_by_col: Dict[str, int] = defaultdict(int)
     missing_students_by_col: Dict[str, List[str]] = defaultdict(list)
+    rows_by_col: Dict[str, int] = defaultdict(int)
     samples_invalid_by_col: Dict[str, List[str]] = defaultdict(list)
     candidatos: List[Dict[str, Any]] = []
 
@@ -1380,6 +1382,7 @@ def carregar_notas_notion(
                 col_name = str(desc.get("name", "")).strip()
                 if not col_name:
                     continue
+                rows_by_col[col_name] += 1
                 prop = _resolve_prop_for_descriptor(props, desc)
 
                 raw_nota, nota = _extract_grade_value(prop)
@@ -1439,6 +1442,27 @@ def carregar_notas_notion(
             preview = ", ".join(students[:12])
             extra = "" if len(students) <= 12 else f" (+{len(students)-12})"
             _log(logger, f"Diagnostico: alunos sem nota em '{col_name}': {len(students)} -> {preview}{extra}")
+
+    if STRICT_NOTION_NOTES:
+        partial_columns = []
+        for col_name, total_rows in sorted(rows_by_col.items()):
+            valid = parsed_notes_by_col.get(col_name, 0)
+            missing = len(missing_students_by_col.get(col_name, []))
+            invalid = invalid_notes_by_col.get(col_name, 0)
+            # Falha quando a coluna aparenta ser a atividade alvo e existe valor parcial.
+            if valid > 0 and (missing > 0 or invalid > 0):
+                partial_columns.append((col_name, total_rows, valid, missing, invalid))
+
+        if partial_columns:
+            details = []
+            for col_name, total_rows, valid, missing, invalid in partial_columns:
+                details.append(
+                    f"{col_name}: total={total_rows}, validas={valid}, sem_nota={missing}, invalidas={invalid}"
+                )
+            raise LancamentoError(
+                "Existem colunas de avaliacao parcialmente preenchidas no Notion. "
+                + " | ".join(details)
+            )
 
     _log(logger, f"Total de notas carregadas do Notion: {len(registros)}")
     return registros
@@ -2839,6 +2863,17 @@ def _update_launch_status_for_notes(registros: List[RegistroNota], logger: Optio
                 _safe_notion_call(
                     lambda page_id=page_id, payload=payload: notion.pages.update(page_id=page_id, properties=payload)
                 )
+
+                # Verificacao leve para evitar falso sucesso de status.
+                try:
+                    page_after = _safe_notion_call(lambda page_id=page_id: notion.pages.retrieve(page_id=page_id))
+                    props_after = page_after.get("properties", {}) or {}
+                    for updated_name in payload.keys():
+                        if updated_name not in props_after:
+                            _log(logger, f"Aviso: status '{updated_name}' nao apareceu apos update em {page_id}.")
+                except Exception as exc:  # noqa: BLE001
+                    _log(logger, f"Aviso: falha ao verificar update de status em {page_id}: {exc}")
+
                 atualizados += regs_atualizadas
         except Exception as exc:  # noqa: BLE001
             falhas += len(regs_pagina)
