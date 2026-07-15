@@ -412,6 +412,33 @@ def _is_launched_status(value: str) -> bool:
     return normalized in {"lancada", "concluido", "concluida", "ok", "done"}
 
 
+def _is_placeholder_activity_name(name: str) -> bool:
+    normalized = _normalize(name or "")
+    return bool(re.fullmatch(r"atividade\s+\d+", normalized))
+
+
+def _seq_status_columns_from_database(database_obj: Optional[Dict]) -> List[str]:
+    props = (database_obj or {}).get("properties", {}) or {}
+    if not isinstance(props, dict):
+        return []
+
+    pairs: List[Tuple[int, str]] = []
+    fallback: List[str] = []
+    for key, pinfo in props.items():
+        pname = str((pinfo or {}).get("name", "")).strip() or str(key).strip()
+        normalized = _normalize(pname)
+        if not normalized.startswith("status lancamento"):
+            continue
+        match = re.search(r"(\d+)\s*$", normalized)
+        if match:
+            pairs.append((int(match.group(1)), pname))
+        else:
+            fallback.append(pname)
+
+    pairs.sort(key=lambda item: item[0])
+    return [name for _, name in pairs] + fallback
+
+
 def _database_property_descriptors(database_obj: Optional[Dict]) -> List[Dict[str, Any]]:
     props = (database_obj or {}).get("properties", {}) or {}
     if not isinstance(props, dict):
@@ -1343,8 +1370,11 @@ def carregar_notas_notion(
         rows = item["rows"]
         activity_status_map = _build_activity_status_map(item.get("db_obj"))
         activity_date_map = _build_activity_date_map(item.get("db_obj"))
+        seq_status_columns = _seq_status_columns_from_database(item.get("db_obj"))
         descriptors = _database_property_descriptors(item.get("db_obj"))
         grade_descriptors = [d for d in descriptors if _is_probably_grade_property(str(d.get("name", "")), {"type": d.get("type")})]
+        db_registros: List[RegistroNota] = []
+        db_valid_by_col: Dict[str, int] = defaultdict(int)
 
         # Complementa com colunas derivadas de uma linha hidratada para cobrir
         # casos em que o metadata da database vem incompleto/desalinhado.
@@ -1460,10 +1490,11 @@ def carregar_notas_notion(
                     continue
 
                 parsed_notes_by_col[col_name.strip()] += 1
+                db_valid_by_col[col_name.strip()] += 1
                 if _is_non_empty(raw_nota):
                     non_empty_values_by_col[col_name.strip()] += 1
 
-                registros.append(
+                db_registros.append(
                     RegistroNota(
                         escola=context.escola,
                         turno=context.turno,
@@ -1479,6 +1510,34 @@ def carregar_notas_notion(
                         notion_date_value=date_value,
                     )
                 )
+
+        active_named_columns = [
+            str(desc.get("name", "")).strip()
+            for desc in grade_descriptors
+            if str(desc.get("name", "")).strip()
+            and db_valid_by_col.get(str(desc.get("name", "")).strip(), 0) > 0
+            and not _is_placeholder_activity_name(str(desc.get("name", "")).strip())
+        ]
+        active_placeholder_columns = [
+            str(desc.get("name", "")).strip()
+            for desc in grade_descriptors
+            if str(desc.get("name", "")).strip()
+            and db_valid_by_col.get(str(desc.get("name", "")).strip(), 0) > 0
+            and _is_placeholder_activity_name(str(desc.get("name", "")).strip())
+        ]
+        active_columns = active_named_columns or active_placeholder_columns
+
+        if active_columns and seq_status_columns:
+            remap = {
+                col_name: seq_status_columns[idx]
+                for idx, col_name in enumerate(active_columns)
+                if idx < len(seq_status_columns)
+            }
+            for reg in db_registros:
+                if reg.atividade in remap:
+                    reg.notion_status_prop = remap[reg.atividade]
+
+        registros.extend(db_registros)
 
     if not registros:
         _log(logger, "Aviso: nenhum registro de nota valido foi construido a partir das databases processadas.")
