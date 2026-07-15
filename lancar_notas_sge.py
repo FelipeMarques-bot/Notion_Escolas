@@ -2965,10 +2965,12 @@ def _update_launch_status_for_notes(registros: List[RegistroNota], logger: Optio
                     continue
 
                 prop_adicionado = False
+                prop_coberto_no_payload = False
                 for status_prop_real in status_targets:
                     if status_prop_real in payload:
-                        prop_adicionado = True
-                        break
+                        # Esta propriedade ja sera atualizada nesta mesma chamada.
+                        prop_coberto_no_payload = True
+                        continue
                     prop_info = props.get(status_prop_real, {})
                     status_payload = _build_launch_status_payload(prop_info, success=True)
                     if status_payload is None:
@@ -2977,7 +2979,7 @@ def _update_launch_status_for_notes(registros: List[RegistroNota], logger: Optio
                     prop_adicionado = True
                     break
 
-                if prop_adicionado:
+                if prop_adicionado or prop_coberto_no_payload:
                     regs_atualizadas += 1
                 else:
                     _log(logger, f"Aviso: propriedade de status nao encontrada/compativel para {reg.aluno}: {status_prop}")
@@ -3048,10 +3050,12 @@ def _mark_failed_launch_status_for_notes(registros: List[RegistroNota], logger: 
                     continue
 
                 prop_adicionado = False
+                prop_coberto_no_payload = False
                 for status_prop_real in status_targets:
                     if status_prop_real in payload:
-                        prop_adicionado = True
-                        break
+                        # Esta propriedade ja sera atualizada nesta mesma chamada.
+                        prop_coberto_no_payload = True
+                        continue
                     prop_info = props.get(status_prop_real, {})
                     status_payload = _build_launch_status_payload(prop_info, success=False)
                     if status_payload is None:
@@ -3060,7 +3064,7 @@ def _mark_failed_launch_status_for_notes(registros: List[RegistroNota], logger: 
                     prop_adicionado = True
                     break
 
-                if prop_adicionado:
+                if prop_adicionado or prop_coberto_no_payload:
                     regs_atualizadas += 1
                 else:
                     falhas += 1
