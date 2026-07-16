@@ -110,13 +110,15 @@ O workflow `Plano de Aula - Sequencia Didatica` le registros da database
 `Sequencias Didaticas - PDFs` e cria planejamentos, anexa PDFs e ativa
 situacoes no SGE para cada turma.
 
+Somente linhas com checkbox `Ativo` marcado sao consideradas para lancamento.
+
 ### Fluxo de execucao
 
 1. Carrega registros da database do Notion.
 2. Filtra por ano (`--ano`) e escola (`--escola`).
 3. Para cada contexto (escola + turno + turma + trimestre), faz:
    - **Match de template**: encontra o registro de sequencia correspondente
-     (por ano, escola e nome de arquivo/titulo).
+  (por ano, escola e Name/titulo).
    - **Cria planejamento**: preenche periodo e numero de aulas no SGE.
    - **Anexa PDF**: faz upload do arquivo da sequencia didatica.
    - **Ativa situacao**: marca a situacao da linha como concluida.
@@ -133,8 +135,8 @@ python lancar_sequencia_didatica_sge.py --data-inicio 2025-02-01 --data-fim 2025
 # Filtrar por escola e ano
 python lancar_sequencia_didatica_sge.py --escola "Tancredo" --ano "6º Ano" --data-inicio 2025-02-01 --data-fim 2025-02-28
 
-# Especificar arquivos PDF por ano
-python lancar_sequencia_didatica_sge.py --arquivo-6-ano "seq_6.pdf" --arquivo-7-ano "seq_7.pdf" --data-inicio 2025-02-01 --data-fim 2025-02-28
+# Especificar Name (titulo no Notion/portal) por ano
+python lancar_sequencia_didatica_sge.py --name-6-ano "Sequencia didatica 6" --name-7-ano "Sequencia didatica 7" --data-inicio 2025-02-01 --data-fim 2025-02-28
 ```
 
 ### Match de template (sequencia)
@@ -144,14 +146,20 @@ O script encontra o template correto seguindo esta ordem:
 1. **Por ano**: filtra registros cujo ano corresponde ao da turma.
 2. **Por escola**: prioriza registros com a mesma escola do contexto.
    Se nenhum bater, usa registros sem escola preenchida.
-3. **Por arquivo**: se um nome de arquivo foi informado via CLI
-   (`--arquivo-6-ano`, etc.), tenta match tolerante:
-   - match exato apos normalizar (sem acentos, lowercase)
-   - `startswith` em qualquer direcao
-   - ignorar sufixo " Ano.pdf" / ".pdf"
-4. **Fallback por titulo**: se o nome do arquivo nao casar, tenta
-   match pelo titulo do documento no Notion.
-5. **Ultimo recurso**: usa o primeiro registro restante.
+3. **Por Name/titulo**: se um Name foi informado via CLI
+  (`--name-6-ano`, etc.), tenta match tolerante com o titulo do
+  documento no Notion.
+4. **Ultimo recurso**: usa o primeiro registro restante.
+
+### Status de publicacao no Notion
+
+Durante e ao final da execucao, o bot tenta atualizar a coluna
+`Status publicação plano SGE` com opcoes compativeis, por exemplo:
+
+- `Em execução` (inicio do processamento da linha)
+- `Publicado no SGE` (sucesso completo)
+- `Simulado (dry run)` (quando `--dry-run`)
+- `Erro na publicação` (falha)
 
 Se nenhum template for encontrado para uma turma, ela e pulada com
 falha registrada no resumo final.

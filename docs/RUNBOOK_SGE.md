@@ -124,6 +124,8 @@ Aviso: nenhum template de sequencia encontrado para 6º Ano (Escola X)
 1. A database `Sequencias Didaticas - PDFs` nao tem registros para o ano da turma.
 2. O filtro `--ano` esta excluindo registros.
 3. O campo `Ano` no Notion nao corresponde ao formato esperado (ex.: "6º Ano").
+4. A linha nao esta com checkbox `Ativo` marcado.
+5. O Name informado no workflow/CLI nao corresponde ao campo Name da linha.
 
 ### Diagnosticos
 
@@ -134,9 +136,10 @@ Verificar os logs com prefixo `[diag]`:
 
 ### Solucao
 
-1. Verificar se a database tem registros ativos (campo `Ativo?` marcado).
+1. Verificar se a database tem registros ativos (campo `Ativo` marcado).
 2. Verificar se o campo `Ano` esta preenchido corretamente (ex.: "6º Ano").
 3. Se necessario, usar `--ano` para filtrar explicitamente.
+4. Se usar Name por ano no workflow/CLI, validar o texto exato do campo Name.
 
 ---
 
@@ -177,12 +180,25 @@ python lancar_sequencia_didatica_sge.py --dry-run --data-inicio 2025-02-01 --dat
 # Com filtro de escola e ano
 python lancar_sequencia_didatica_sge.py --escola "Tancredo" --ano "6º Ano" --dry-run --data-inicio 2025-02-01 --data-fim 2025-02-28
 
+# Com Name por ano (campo Name no Notion / titulo no portal)
+python lancar_sequencia_didatica_sge.py --name-6-ano "Sequencia didatica 6" --name-7-ano "Sequencia didatica 7" --dry-run --data-inicio 2025-02-01 --data-fim 2025-02-28
+
 # Com debug de login (screenshot + HTML)
 SGE_DEBUG_LOGIN=1 SGE_DEBUG_DIR=./debug python lancar_sequencia_didatica_sge.py --dry-run --data-inicio 2025-02-01 --data-fim 2025-02-28
 
 # Login manual com navegador visivel
 HEADLESS=0 MANUAL_LOGIN=1 python lancar_sequencia_didatica_sge.py --dry-run --data-inicio 2025-02-01 --data-fim 2025-02-28
 ```
+
+### Status de publicacao no Notion
+
+Durante e ao final do processamento, o bot atualiza a coluna
+`Status publicação plano SGE` com os estados:
+
+- `Em execução`
+- `Publicado no SGE`
+- `Simulado (dry run)`
+- `Erro na publicação`
 
 ### Lancamento de notas
 

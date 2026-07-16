@@ -3,23 +3,23 @@ name: Plano de Aula - Sequência Didática
 on:
   workflow_dispatch:
     inputs:
-      arquivo_6_ano:
-        description: Nome do arquivo PDF para 6º ano (somente nome)
+      name_6_ano:
+        description: Valor do campo Name no Notion (titulo no portal) para 6º ano
         required: false
         default: ""
         type: string
-      arquivo_7_ano:
-        description: Nome do arquivo PDF para 7º ano (somente nome)
+      name_7_ano:
+        description: Valor do campo Name no Notion (titulo no portal) para 7º ano
         required: false
         default: ""
         type: string
-      arquivo_8_ano:
-        description: Nome do arquivo PDF para 8º ano (somente nome)
+      name_8_ano:
+        description: Valor do campo Name no Notion (titulo no portal) para 8º ano
         required: false
         default: ""
         type: string
-      arquivo_9_ano:
-        description: Nome do arquivo PDF para 9º ano (somente nome)
+      name_9_ano:
+        description: Valor do campo Name no Notion (titulo no portal) para 9º ano
         required: false
         default: ""
         type: string
@@ -109,10 +109,10 @@ jobs:
         env:
           DATA_INICIO: ${{ github.event.inputs.data_inicio }}
           DATA_FIM: ${{ github.event.inputs.data_fim }}
-          ARQ_6: ${{ github.event.inputs.arquivo_6_ano }}
-          ARQ_7: ${{ github.event.inputs.arquivo_7_ano }}
-          ARQ_8: ${{ github.event.inputs.arquivo_8_ano }}
-          ARQ_9: ${{ github.event.inputs.arquivo_9_ano }}
+          NAME_6: ${{ github.event.inputs.name_6_ano }}
+          NAME_7: ${{ github.event.inputs.name_7_ano }}
+          NAME_8: ${{ github.event.inputs.name_8_ano }}
+          NAME_9: ${{ github.event.inputs.name_9_ano }}
         run: |
           set -euo pipefail
 
@@ -121,9 +121,9 @@ jobs:
             exit 1
           fi
 
-          if [[ -z "$ARQ_6" && -z "$ARQ_7" && -z "$ARQ_8" && -z "$ARQ_9" ]]; then
-            echo "Aviso: nenhum arquivo (6º/7º/8º/9º ano) foi informado. Prosseguindo mesmo assim."
-            echo "Aviso: o script vai usar o que estiver disponivel na database do Notion."
+          if [[ -z "$NAME_6" && -z "$NAME_7" && -z "$NAME_8" && -z "$NAME_9" ]]; then
+            echo "Aviso: nenhum Name (6º/7º/8º/9º ano) foi informado. Prosseguindo mesmo assim."
+            echo "Aviso: o script vai usar o primeiro registro elegivel por ano/escola na database do Notion."
           fi
 
       - name: Validar secrets obrigatorios
@@ -167,10 +167,10 @@ jobs:
           INPUT_DATA_FIM: ${{ github.event.inputs.data_fim }}
           INPUT_TRIMESTRE: ${{ github.event.inputs.trimestre }}
           INPUT_ANO: ${{ github.event.inputs.ano }}
-          INPUT_ARQ_6: ${{ github.event.inputs.arquivo_6_ano }}
-          INPUT_ARQ_7: ${{ github.event.inputs.arquivo_7_ano }}
-          INPUT_ARQ_8: ${{ github.event.inputs.arquivo_8_ano }}
-          INPUT_ARQ_9: ${{ github.event.inputs.arquivo_9_ano }}
+          INPUT_NAME_6: ${{ github.event.inputs.name_6_ano }}
+          INPUT_NAME_7: ${{ github.event.inputs.name_7_ano }}
+          INPUT_NAME_8: ${{ github.event.inputs.name_8_ano }}
+          INPUT_NAME_9: ${{ github.event.inputs.name_9_ano }}
         shell: bash
         run: |
           set -euo pipefail
@@ -183,10 +183,10 @@ jobs:
           if [[ -n "$INPUT_ANO" && "$INPUT_ANO" != "Todos" ]]; then ARGS+=("--ano" "$INPUT_ANO"); fi
           if [[ -n "$INPUT_DATA_INICIO" ]]; then ARGS+=("--data-inicio" "$INPUT_DATA_INICIO"); fi
           if [[ -n "$INPUT_DATA_FIM" ]]; then ARGS+=("--data-fim" "$INPUT_DATA_FIM"); fi
-          if [[ -n "$INPUT_ARQ_6" ]]; then ARGS+=("--arquivo-6-ano" "$INPUT_ARQ_6"); fi
-          if [[ -n "$INPUT_ARQ_7" ]]; then ARGS+=("--arquivo-7-ano" "$INPUT_ARQ_7"); fi
-          if [[ -n "$INPUT_ARQ_8" ]]; then ARGS+=("--arquivo-8-ano" "$INPUT_ARQ_8"); fi
-          if [[ -n "$INPUT_ARQ_9" ]]; then ARGS+=("--arquivo-9-ano" "$INPUT_ARQ_9"); fi
+          if [[ -n "$INPUT_NAME_6" ]]; then ARGS+=("--name-6-ano" "$INPUT_NAME_6"); fi
+          if [[ -n "$INPUT_NAME_7" ]]; then ARGS+=("--name-7-ano" "$INPUT_NAME_7"); fi
+          if [[ -n "$INPUT_NAME_8" ]]; then ARGS+=("--name-8-ano" "$INPUT_NAME_8"); fi
+          if [[ -n "$INPUT_NAME_9" ]]; then ARGS+=("--name-9-ano" "$INPUT_NAME_9"); fi
           if [[ "$INPUT_DRY_RUN" == "true" ]]; then ARGS+=("--dry-run"); fi
 
           echo "Executando python ${ARGS[*]}"

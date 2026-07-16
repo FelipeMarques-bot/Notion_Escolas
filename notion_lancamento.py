@@ -753,18 +753,23 @@ def propriedades_database_sequencia_didatica(titulo_prop="Name"):
         "Titulo Documento": {
             "rich_text": {},
         },
+        "Link do arquivo": {
+            "url": {},
+        },
         "Arquivo PDF": {
             "files": {},
         },
         "Ativo": {
             "checkbox": {},
         },
-        "Status lancamento": {
+        "Status publicação plano SGE": {
             "select": {
                 "options": [
                     {"name": "Pendente", "color": "yellow"},
-                    {"name": "Concluido", "color": "green"},
-                    {"name": "Erro", "color": "red"},
+                    {"name": "Em execução", "color": "blue"},
+                    {"name": "Publicado no SGE", "color": "green"},
+                    {"name": "Simulado (dry run)", "color": "gray"},
+                    {"name": "Erro na publicação", "color": "red"},
                 ]
             },
         },

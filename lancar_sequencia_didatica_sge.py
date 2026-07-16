@@ -214,6 +214,35 @@ def _first_file_from_prop(prop: Dict) -> Tuple[str, str]:
     return name, url
 
 
+def _extract_link_arquivo(props: Dict) -> str:
+    """Extrai URL do arquivo priorizando propriedades de link (Drive)."""
+    link = _extract_select_or_text(
+        props,
+        [
+            "Link do arquivo",
+            "Link do Arquivo",
+            "Link Drive",
+            "Link do Drive",
+            "URL do arquivo",
+            "URL do Arquivo",
+        ],
+    ).strip()
+    if link:
+        return link
+
+    for _pname, pval in props.items():
+        ptype = pval.get("type", "")
+        if ptype == "url":
+            url = (pval.get("url", "") or "").strip()
+            if url:
+                return url
+        elif ptype == "rich_text":
+            txt = _extract_plain_text(pval).strip()
+            if txt and ("http://" in txt or "https://" in txt or "drive.google" in txt):
+                return txt
+    return ""
+
+
 def _extract_date_property(props: Dict, names: List[str]) -> str:
     """Extrai a PRIMEIRA data de uma propriedade.
 
@@ -300,6 +329,88 @@ def _is_active_row(props: Dict) -> bool:
     return True
 
 
+def _extract_status_publicacao(props: Dict) -> str:
+    return _extract_select_or_text(
+        props,
+        [
+            "Status publicação plano SGE",
+            "Status publicacao plano SGE",
+            "Status publicação",
+            "Status publicacao",
+        ],
+    ).strip()
+
+
+def _status_is_published(status: str) -> bool:
+    norm = _normalize(status)
+    return "publicado" in norm
+
+
+def _pick_matching_name(candidates: List[str], preferred_names: List[str]) -> str:
+    if not candidates:
+        return preferred_names[0] if preferred_names else ""
+
+    normalized = {_normalize(name): name for name in candidates}
+    for name in preferred_names:
+        hit = normalized.get(_normalize(name))
+        if hit:
+            return hit
+    return candidates[0]
+
+
+def _set_notion_publicacao_status(notion: Client, page_id: str, status_candidates: List[str], logger=None) -> bool:
+    try:
+        page_obj = _safe_notion_call(lambda: notion.pages.retrieve(page_id=page_id))
+    except Exception as exc:  # noqa: BLE001
+        _log(logger, f"Notion: falha ao recuperar pagina {page_id} para atualizar status: {exc}")
+        return False
+
+    props = page_obj.get("properties", {})
+    prop_name = ""
+    prop_names = list(props.keys())
+    for preferred in [
+        "Status publicação plano SGE",
+        "Status publicacao plano SGE",
+        "Status publicação",
+        "Status publicacao",
+    ]:
+        for current in prop_names:
+            if _normalize(current) == _normalize(preferred):
+                prop_name = current
+                break
+        if prop_name:
+            break
+
+    if not prop_name:
+        _log(logger, f"Notion: propriedade de status de publicacao nao encontrada na pagina {page_id}.")
+        return False
+
+    prop = props.get(prop_name, {})
+    available_options = []
+    if prop.get("type") == "select":
+        available_options = [
+            opt.get("name", "")
+            for opt in (prop.get("select", {}).get("options", []) or [])
+            if opt.get("name")
+        ]
+
+    target_status = _pick_matching_name(available_options, status_candidates)
+    if not target_status:
+        target_status = status_candidates[0]
+
+    try:
+        _safe_notion_call(
+            lambda: notion.pages.update(
+                page_id=page_id,
+                properties={prop_name: {"select": {"name": target_status}}},
+            )
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        _log(logger, f"Notion: falha ao marcar pagina {page_id} como '{target_status}': {exc}")
+        return False
+
+
 def _load_sequencias_from_notion(logger=None) -> List[SequenciaRegistro]:
     root_page_id = _normalize_notion_id(ROOT_PAGE_ID)
 
@@ -369,21 +480,11 @@ def _load_sequencias_from_notion(logger=None) -> List[SequenciaRegistro]:
             titulo_documento = titulo_linha
 
         arquivo_nome, arquivo_url = _first_file_from_prop(props.get("Arquivo PDF", {}))
-        link_arquivo = _extract_select_or_text(props, ["Link do arquivo", "Link do Arquivo"])
-        if not link_arquivo:
-            for pname, pval in props.items():
-                ptype = pval.get("type", "")
-                if ptype == "url":
-                    link_arquivo = pval.get("url", "") or ""
-                    if link_arquivo:
-                        print(f"[diag] URL encontrada em '{pname}' (tipo={ptype}): {link_arquivo}")
-                        break
-                elif ptype == "rich_text":
-                    txt = _extract_plain_text(pval).strip()
-                    if txt and ("http://" in txt or "https://" in txt or "drive.google" in txt):
-                        link_arquivo = txt
-                        print(f"[diag] URL extraida de rich_text '{pname}': {link_arquivo}")
-                        break
+        link_arquivo = _extract_link_arquivo(props)
+        # O fluxo de sequencia didatica deve usar preferencialmente o link
+        # (ex.: Google Drive), nao o arquivo anexado no Notion.
+        if link_arquivo and not arquivo_nome:
+            arquivo_nome = titulo_documento or titulo_linha
 
         # Em vez de chamar _extract_date_property duas vezes (que retorna
         # o mesmo inicio), le a coluna 'Periodo' (unica) uma vez e extrai
@@ -447,16 +548,16 @@ def _load_sequencias_from_notion(logger=None) -> List[SequenciaRegistro]:
             n_aulas = 4
             _log(logger, f"Linha '{titulo_linha or '(sem titulo)'}': N aulas ausente, usando {n_aulas} (padrao 1 aula/semana).")
 
-        status = _extract_select_or_text(props, ["Status publicação plano SGE", "Status publicacao plano SGE"]).strip()
+        status = _extract_status_publicacao(props)
 
-        if status.lower() == "publicado":
+        if _status_is_published(status):
             _log(logger, f"Linha '{titulo_linha or '(sem titulo)'}' ja publicada; pulando.")
             continue
 
         # Log detalhado do que faltou (ajuda a diagnosticar schema do Notion).
         missing = []
         if not titulo_documento: missing.append("Titulo Documento")
-        if not arquivo_url and not link_arquivo: missing.append("Arquivo PDF (sem URL ou link)")
+        if not link_arquivo: missing.append("Link do arquivo (Drive)")
         if not periodo_inicio: missing.append("Periodo inicio")
         if not periodo_fim: missing.append("Periodo fim")
         if n_aulas <= 0: missing.append("N aulas")
@@ -563,7 +664,7 @@ def _filter_contexts(contextos_raw: List[Dict[str, str]], escola: str, trimestre
 def _pick_template_for_context(
     registros: List[SequenciaRegistro],
     contexto: ContextoPlano,
-    filename_by_ano: Dict[str, str],
+    name_by_ano: Dict[str, str],
     override_inicio: str,
     override_fim: str,
     logger=None,
@@ -595,46 +696,25 @@ def _pick_template_for_context(
             _log(logger, f"[diag] Escolas disponiveis nos candidatos: {sorted({r.escola for r in candidates if r.escola})}")
             return None
 
-    wanted_file = _norm_file_name(filename_by_ano.get(ano, ""))
-    if wanted_file:
-        _log(logger, f"[diag] Buscando arquivo '{wanted_file}' entre {len(candidates)} candidato(s).")
+    wanted_name = _normalize_match(name_by_ano.get(ano, ""))
+    if wanted_name:
+        _log(logger, f"[diag] Buscando Name/titulo '{wanted_name}' entre {len(candidates)} candidato(s).")
 
-        def _file_matches(wanted: str, candidate: str) -> bool:
-            cand = _norm_file_name(candidate)
-            if not cand:
-                return False
-            cand_stripped = re.sub(r"\s+ano\.pdf$", "", cand).rstrip()
-            cand_stripped = re.sub(r"\.pdf$", "", cand_stripped).rstrip()
-            wanted_stripped = re.sub(r"\s+ano\.pdf$", "", wanted).rstrip()
-            wanted_stripped = re.sub(r"\.pdf$", "", wanted_stripped).rstrip()
-            return (
+        def _title_matches(wanted: str, candidate: str) -> bool:
+            cand = _normalize_match(candidate)
+            return bool(cand) and (
                 cand == wanted
-                or cand_stripped == wanted
-                or cand == wanted_stripped
-                or cand_stripped == wanted_stripped
                 or cand.startswith(wanted)
                 or wanted.startswith(cand)
             )
 
-        matched = [r for r in candidates if _file_matches(wanted_file, r.arquivo_nome)]
+        matched = [r for r in candidates if _title_matches(wanted_name, r.titulo_documento)]
         if matched:
             candidates = matched
-            _log(logger, f"[diag] Match por nome de arquivo: {len(candidates)} candidato(s).")
+            _log(logger, f"[diag] Match por Name/titulo: {len(candidates)} candidato(s).")
         else:
-            # Fallback: tentar match por titulo do documento.
-            _log(logger, f"[diag] Nenhum match de arquivo. Nomes disponiveis: {[r.arquivo_nome for r in candidates]}")
-            wanted_title = _normalize_match(filename_by_ano.get(ano, ""))
-            title_matched = [
-                r for r in candidates
-                if wanted_title and _normalize_match(r.titulo_documento) == wanted_title
-            ]
-            if title_matched:
-                candidates = title_matched
-                _log(logger, f"[diag] Fallback match por titulo: {len(candidates)} candidato(s).")
-            else:
-                _log(logger, f"[diag] Titulos disponiveis: {[r.titulo_documento for r in candidates]}")
-                _log(logger, "[diag] Sem match por arquivo ou titulo; retornando primeiro candidato disponivel.")
-                # Retorna o primeiro candidato do ano+escola sem filtro de arquivo.
+            _log(logger, f"[diag] Nenhum match por Name/titulo. Titulos disponiveis: {[r.titulo_documento for r in candidates]}")
+            _log(logger, "[diag] Sem match por Name/titulo; retornando primeiro candidato disponivel.")
 
     chosen = candidates[0]
     _log(logger, f"[diag] Registro escolhido: ano='{chosen.ano}' escola='{chosen.escola}' "
@@ -1331,9 +1411,9 @@ def _executar_fluxo_plano_aulas(page, contexto: ContextoPlano, registro: Sequenc
     page.wait_for_load_state("networkidle", timeout=NAV_TIMEOUT_MS)
     page.wait_for_timeout(1500)
 
-    pdf_url = registro.arquivo_url or registro.link_arquivo
+    pdf_url = registro.link_arquivo or registro.arquivo_url
     if not pdf_url:
-        raise LancamentoError("Nenhum arquivo PDF ou link do arquivo disponivel para download.")
+        raise LancamentoError("Nenhum link do arquivo (Drive) ou URL de arquivo disponivel para download.")
     arquivo_local = _download_pdf(pdf_url, registro.arquivo_nome)
     if not _fill_anexo_form(page, registro.titulo_documento, arquivo_local):
         debug_dir = os.environ.get("SGE_DEBUG_DIR", "artifacts/sge-login")
@@ -1373,7 +1453,7 @@ def executar_lancamento_sequencia(
     dry_run: bool = False,
     data_inicio: str = "",
     data_fim: str = "",
-    arquivo_por_ano: Optional[Dict[str, str]] = None,
+    name_por_ano: Optional[Dict[str, str]] = None,
     ano: str = "",
     logger=print,
 ) -> ExecucaoResumo:
@@ -1441,8 +1521,8 @@ def executar_lancamento_sequencia(
     )
     _log(
         logger,
-        f"[diag] filename_by_ano passado ao pick: " + ", ".join(
-            f"{k}='{v}'" for k, v in (arquivo_por_ano or {}).items()
+        f"[diag] name_by_ano passado ao pick: " + ", ".join(
+            f"{k}='{v}'" for k, v in (name_por_ano or {}).items()
         ) + "."
     )
 
@@ -1466,12 +1546,13 @@ def executar_lancamento_sequencia(
         for idx, ctx in enumerate(contextos, start=1):
             turma_label = f"{ctx.escola} | {ctx.turno} | {ctx.turma} | {ctx.trimestre}"
             _log(logger, f"[{idx}/{len(contextos)}] Processando {turma_label}")
+            registro: Optional[SequenciaRegistro] = None
 
             try:
                 registro = _pick_template_for_context(
                     registros,
                     contexto=ctx,
-                    filename_by_ano=arquivo_por_ano or {},
+                    name_by_ano=name_por_ano or {},
                     override_inicio=_fmt_date_ddmmyyyy(data_inicio),
                     override_fim=_fmt_date_ddmmyyyy(data_fim),
                     logger=logger,
@@ -1483,6 +1564,20 @@ def executar_lancamento_sequencia(
                     resumo.falhas += 1
                     resumo.falhas_detalhes.append(msg)
                     continue
+
+                pid = registro.page_id
+                if pid not in status_map:
+                    status_map[pid] = {"total": 0, "ok": 0, "falha": 0, "titulo": registro.titulo_documento}
+                    if not dry_run:
+                        notion_status = Client(auth=NOTION_TOKEN)
+                        if _set_notion_publicacao_status(
+                            notion_status,
+                            pid,
+                            ["Em execução", "Em execucao", "Pendente"],
+                            logger=logger,
+                        ):
+                            _log(logger, f"Notion: registro '{registro.titulo_documento}' marcado como Em execução.")
+                status_map[pid]["total"] += 1
 
                 ok_plan, ok_anexo, ok_sit = _executar_fluxo_plano_aulas(
                     page,
@@ -1498,40 +1593,43 @@ def executar_lancamento_sequencia(
                 if ok_sit:
                     resumo.situacoes_ativadas += 1
 
-                pid = registro.page_id
-                if pid not in status_map:
-                    status_map[pid] = {"total": 0, "ok": 0, "titulo": registro.titulo_documento}
-                status_map[pid]["total"] += 1
                 if ok_plan and ok_anexo and ok_sit:
                     status_map[pid]["ok"] += 1
+                else:
+                    status_map[pid]["falha"] += 1
             except PlaywrightTimeoutError as exc:
                 msg = f"Timeout em {turma_label}: {exc}"
                 resumo.falhas += 1
                 resumo.falhas_detalhes.append(msg)
                 _log(logger, msg)
+                if registro and registro.page_id in status_map:
+                    status_map[registro.page_id]["falha"] += 1
                 _click_inicio(page)
             except Exception as exc:  # noqa: BLE001
                 msg = f"Falha em {turma_label}: {exc}"
                 resumo.falhas += 1
                 resumo.falhas_detalhes.append(msg)
                 _log(logger, msg)
+                if registro and registro.page_id in status_map:
+                    status_map[registro.page_id]["falha"] += 1
                 _click_inicio(page)
 
         context.close()
         browser.close()
 
-    if not dry_run:
-        notion_status = Client(auth=NOTION_TOKEN)
-        for pid, info in status_map.items():
-            if info["ok"] == info["total"] and info["total"] > 0:
-                try:
-                    notion_status.pages.update(
-                        page_id=pid,
-                        properties={"Status publicação plano SGE": {"select": {"name": "Publicado"}}},
-                    )
-                    _log(logger, f"Notion: registro '{info['titulo']}' marcado como Publicado.")
-                except Exception as exc:  # noqa: BLE001
-                    _log(logger, f"Notion: falha ao marcar '{info['titulo']}' como Publicado: {exc}")
+    notion_status = Client(auth=NOTION_TOKEN)
+    for pid, info in status_map.items():
+        if dry_run:
+            final_candidates = ["Simulado (dry run)", "Simulado", "Pendente"]
+        elif info["ok"] == info["total"] and info["total"] > 0:
+            final_candidates = ["Publicado no SGE", "Publicado"]
+        elif info["ok"] > 0:
+            final_candidates = ["Em execução", "Em execucao"]
+        else:
+            final_candidates = ["Erro na publicação", "Erro na publicacao", "Erro"]
+
+        if _set_notion_publicacao_status(notion_status, pid, final_candidates, logger=logger):
+            _log(logger, f"Notion: registro '{info['titulo']}' status final atualizado.")
 
     _log(logger, "--- Resumo da execucao ---")
     _log(logger, f"Contextos processados: {resumo.contextos_total}")
@@ -1555,10 +1653,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--modo-execucao", default="por_escola", choices=["por_escola", "por_turma_em_todas_as_escolas"])
     parser.add_argument("--data-inicio", default="")
     parser.add_argument("--data-fim", default="")
-    parser.add_argument("--arquivo-6-ano", default="")
-    parser.add_argument("--arquivo-7-ano", default="")
-    parser.add_argument("--arquivo-8-ano", default="")
-    parser.add_argument("--arquivo-9-ano", default="")
+    parser.add_argument("--name-6-ano", "--arquivo-6-ano", dest="name_6_ano", default="")
+    parser.add_argument("--name-7-ano", "--arquivo-7-ano", dest="name_7_ano", default="")
+    parser.add_argument("--name-8-ano", "--arquivo-8-ano", dest="name_8_ano", default="")
+    parser.add_argument("--name-9-ano", "--arquivo-9-ano", dest="name_9_ano", default="")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -1566,11 +1664,11 @@ def _parse_args() -> argparse.Namespace:
 def main() -> int:
     args = _parse_args()
 
-    arquivo_por_ano = {
-        "6º Ano": args.arquivo_6_ano,
-        "7º Ano": args.arquivo_7_ano,
-        "8º Ano": args.arquivo_8_ano,
-        "9º Ano": args.arquivo_9_ano,
+    name_por_ano = {
+        "6º Ano": args.name_6_ano,
+        "7º Ano": args.name_7_ano,
+        "8º Ano": args.name_8_ano,
+        "9º Ano": args.name_9_ano,
     }
 
     try:
@@ -1581,7 +1679,7 @@ def main() -> int:
             dry_run=args.dry_run,
             data_inicio=args.data_inicio,
             data_fim=args.data_fim,
-            arquivo_por_ano=arquivo_por_ano,
+            name_por_ano=name_por_ano,
             ano=args.ano,
             logger=print,
         )
