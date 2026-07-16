@@ -92,6 +92,7 @@ class RegistroNota:
     nota: float
     notion_page_id: str = ""
     notion_status_prop: str = ""
+    notion_status_index: int = 0
     notion_status_value: str = ""
     notion_date_prop: str = ""
     notion_date_value: str = ""
@@ -419,6 +420,27 @@ def _is_placeholder_activity_name(name: str) -> bool:
 
 def _seq_status_columns_from_database(database_obj: Optional[Dict]) -> List[str]:
     props = (database_obj or {}).get("properties", {}) or {}
+    if not isinstance(props, dict):
+        return []
+
+    pairs: List[Tuple[int, str]] = []
+    fallback: List[str] = []
+    for key, pinfo in props.items():
+        pname = str((pinfo or {}).get("name", "")).strip() or str(key).strip()
+        normalized = _normalize(pname)
+        if not normalized.startswith("status lancamento"):
+            continue
+        match = re.search(r"(\d+)\s*$", normalized)
+        if match:
+            pairs.append((int(match.group(1)), pname))
+        else:
+            fallback.append(pname)
+
+    pairs.sort(key=lambda item: item[0])
+    return [name for _, name in pairs] + fallback
+
+
+def _seq_status_columns_from_props(props: Optional[Dict[str, Any]]) -> List[str]:
     if not isinstance(props, dict):
         return []
 
@@ -1527,6 +1549,10 @@ def carregar_notas_notion(
         ]
         active_columns = active_named_columns or active_placeholder_columns
 
+        active_column_order = {
+            col_name: idx + 1
+            for idx, col_name in enumerate(active_columns)
+        }
         if active_columns and seq_status_columns:
             remap = {
                 col_name: seq_status_columns[idx]
@@ -1534,8 +1560,23 @@ def carregar_notas_notion(
                 if idx < len(seq_status_columns)
             }
             for reg in db_registros:
+                status_index = active_column_order.get(reg.atividade, 0)
+                if status_index > 0:
+                    reg.notion_status_index = status_index
                 if reg.atividade in remap:
                     reg.notion_status_prop = remap[reg.atividade]
+                    if status_index > 0:
+                        reg.notion_status_index = status_index
+                elif status_index > 0 and status_index <= len(seq_status_columns):
+                    reg.notion_status_prop = seq_status_columns[status_index - 1]
+                elif status_index > 0:
+                    reg.notion_status_prop = _status_prop_for_activity(reg.atividade)
+
+        elif active_column_order:
+            for reg in db_registros:
+                status_index = active_column_order.get(reg.atividade, 0)
+                if status_index > 0:
+                    reg.notion_status_index = status_index
 
         registros.extend(db_registros)
 
@@ -2948,6 +2989,7 @@ def _update_launch_status_for_notes(registros: List[RegistroNota], logger: Optio
         try:
             page = _safe_notion_call(lambda page_id=page_id: notion.pages.retrieve(page_id=page_id))
             props = page.get("properties", {})
+            seq_status_columns = _seq_status_columns_from_props(props)
             
             payload = {}
             regs_atualizadas = 0
@@ -2955,6 +2997,8 @@ def _update_launch_status_for_notes(registros: List[RegistroNota], logger: Optio
             # Processa todos os registros da mesma página, acumulando os status_props
             for reg in regs_pagina:
                 status_prop = (reg.notion_status_prop or "").strip()
+                if reg.notion_status_index > 0 and reg.notion_status_index <= len(seq_status_columns):
+                    status_prop = seq_status_columns[reg.notion_status_index - 1]
                 if not status_prop:
                     continue
                     
@@ -3034,6 +3078,7 @@ def _mark_failed_launch_status_for_notes(registros: List[RegistroNota], logger: 
         try:
             page = _safe_notion_call(lambda page_id=page_id: notion.pages.retrieve(page_id=page_id))
             props = page.get("properties", {})
+            seq_status_columns = _seq_status_columns_from_props(props)
             
             payload = {}
             regs_atualizadas = 0
@@ -3041,6 +3086,8 @@ def _mark_failed_launch_status_for_notes(registros: List[RegistroNota], logger: 
             # Processa todos os registros da mesma página, acumulando os status_props
             for reg in regs_pagina:
                 status_prop = (reg.notion_status_prop or "").strip()
+                if reg.notion_status_index > 0 and reg.notion_status_index <= len(seq_status_columns):
+                    status_prop = seq_status_columns[reg.notion_status_index - 1]
                 if not status_prop:
                     continue
                     
